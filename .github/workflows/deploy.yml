@@ -1,0 +1,30 @@
+name: Deploy to OCI Server
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up SSH Key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.MY_CUSTOM_OCI_AUTOMATE }}
+
+      - name: Deploy and Restart on OCI
+        env:
+          HOST: ${{ secrets.OCI_HOST }}
+          USER: ${{ secrets.OCI_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
+            cd /home/ubuntu/dexlive-core
+            git pull origin main
+            npm install
+            npm run build
+            pm2 restart all
+          EOF
