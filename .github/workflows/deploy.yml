@@ -37,7 +37,8 @@ jobs:
           key: ${{ secrets.OCI_SSH_KEY }}
           script: |
             cd ~/dexlive
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             npm ci --prefer-offline
             npm run build
             pm2 reload all
