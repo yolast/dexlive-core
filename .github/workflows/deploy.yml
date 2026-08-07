@@ -43,3 +43,4 @@ jobs:
             npm run build
             pm2 reload all
             pm2 save
+            
