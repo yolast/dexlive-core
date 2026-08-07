@@ -1,36 +1,38 @@
-name: Deploy to OCI Server
+name: Build and Deploy to OCI
 
 on:
   push:
     branches: [ main ]
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-      - name: Set up SSH Key
-        uses: webfactory/ssh-agent@v0.9.0
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          ssh-private-key: ${{ secrets.MY_CUSTOM_OCI_AUTOMATE }}
+          node-version: '18.x'
+          cache: 'npm'
 
-      - name: Fast Deploy and Restart on OCI
-        env:
-          HOST: ${{ secrets.OCI_HOST }}
-          USER: ${{ secrets.OCI_USER }}
+      - name: Install Dependencies & Build
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
-            cd /home/ubuntu/dexlive-core
+          npm ci
+          npm run build
+
+      - name: Deploy to OCI via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USERNAME }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          script: |
+            cd ~/dexlive
             git pull origin main
-            
-            # Only install if dependencies changed, using cache-friendly flags
-            npm ci --prefer-offline || npm install
-            
-            # Build Next.js production bundle
+            npm ci --prefer-offline
             npm run build
-            
-            # Zero-downtime restart with PM2
-            pm2 reload all || pm2 restart all
-          EOF
+            pm2 reload all
+            pm2 save
