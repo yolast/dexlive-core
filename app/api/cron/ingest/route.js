@@ -9,22 +9,25 @@ export async function GET(req) {
     console.log("🔄 OCI Ingestion Pipeline started at:", new Date().toISOString());
     let insertedCount = 0;
 
-    // Fetch live trending/new pump tokens from unblocked aggregator endpoint
-    const response = await fetch("https://api.dexscreener.com/latest/dex/tokens/pump", {
+    // Use official DexScreener search endpoint for pump/solana tokens
+    const searchRes = await fetch("https://api.dexscreener.com/latest/dex/search?q=pump", {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       },
       cache: 'no-store'
     });
 
-    if (!response.ok) {
-      throw new Error(`Aggregator responded with status ${response.status}`);
+    if (!searchRes.ok) {
+      throw new Error(`DexScreener search API responded with status ${searchRes.status}`);
     }
 
-    const data = await response.json();
-    const pairs = data.pairs || [];
+    const searchData = await searchRes.json();
+    const pairs = searchData.pairs || [];
 
     for (const pair of pairs) {
+      // Filter strictly for Solana chain
+      if (pair.chainId !== 'solana') continue;
+      
       const mintAddress = pair.baseToken?.address;
       if (!mintAddress) continue;
 
@@ -48,6 +51,8 @@ export async function GET(req) {
 
       if (!upsertError) {
         insertedCount++;
+      } else {
+        console.warn("Supabase upsert warning:", upsertError.message);
       }
     }
 
@@ -62,6 +67,8 @@ export async function GET(req) {
     if (deleteError) {
       console.warn("Cleanup warning:", deleteError.message);
     }
+
+    console.log(`✅ Successfully ingested/synced ${insertedCount} tokens.`);
 
     return NextResponse.json({
       success: true,
