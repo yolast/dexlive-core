@@ -1,11 +1,12 @@
 import WebSocket from 'ws';
-import { createClient } from '@supabase/supabase-js';
-require('dotenv').config({ path: './.env.local' });
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '.env.local') });
 
 const HELIUS_API_KEY = process.env.Helius_Pixiesly_API;
 const WS_URL = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -18,14 +19,13 @@ function connectWebSocket() {
   ws.on('open', () => {
     console.log("🟢 Connected to Helius WebSocket. Subscribing to Pump.fun logs...");
     
-    // Subscribe to logs mentioning the Pump.fun program ID
     const subscriptionMessage = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       method: "logsSubscribe",
       params: [
         { mentions: [PUMP_FUN_PROGRAM] },
-        { commitment: "processed" } // Fastest on-chain commitment level
+        { commitment: "processed" }
       ]
     });
     
@@ -37,24 +37,25 @@ function connectWebSocket() {
       const response = JSON.parse(data);
       if (response.method === "logsNotification") {
         const result = response.params.result;
-        const signature = result.value.signature;
-        const logs = result.value.logs;
+        const signature = result?.value?.signature;
+        const logs = result?.value?.logs || [];
 
         // Check if log indicates a successful token creation
-        const isCreate = logs.some(log => log.includes("InitializeMint") || log.includes("Create"));
-        if (isCreate) {
+        const isCreate = logs.some(log => 
+          typeof log === 'string' && (log.includes("InitializeMint") || log.includes("Create"))
+        );
+
+        if (isCreate && signature) {
           console.log(`🚀 New Pump.fun token event detected! Signature: ${signature}`);
           
-          // Instantly trigger metadata fetch or queue for 15S candle analysis
-          // Write initial record to Supabase tokens_history
-          await supabase.from('tokens_history').upsert({
-            mint: signature, // Temporary or parsed mint
-            name: "Live Streamed Token",
-            symbol: "PUMP",
-            market_cap: 5000,
-            created_timestamp: Date.now(),
-            bonding_curve_progress: 15
-          }, { onConflict: 'mint' });
+          // Instantly trigger your OCI server's ingestion endpoint to grab the real token mint & metadata
+          try {
+            const res = await fetch('http://localhost:3000/api/cron/ingest');
+            const resultData = await res.json();
+            console.log(`⚡ Instant Ingestion Triggered:`, resultData);
+          } catch (fetchErr) {
+            console.error("Failed to trigger local ingestion route:", fetchErr.message);
+          }
         }
       }
     } catch (err) {
@@ -71,6 +72,11 @@ function connectWebSocket() {
     console.error("❌ WebSocket error:", err.message);
     ws.terminate();
   });
+}
+
+if (!HELIUS_API_KEY) {
+  console.error("❌ Helius_Pixiesly_API is missing! Check your .env.local file.");
+  process.exit(1);
 }
 
 connectWebSocket();
