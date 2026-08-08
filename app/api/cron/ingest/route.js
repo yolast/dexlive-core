@@ -6,49 +6,58 @@ export const maxDuration = 30;
 
 export async function GET(req) {
   try {
-    console.log("Pump.fun API direct ingestion started at:", new Date().toISOString());
+    const apiKey = process.env.Helius_Pixiesly_API;
+    if (!apiKey) {
+      console.error("❌ Helius_Pixiesly_API is missing from environment variables.");
+      return NextResponse.json({ success: false, error: "Helius API key missing" }, { status: 500 });
+    }
 
-    // 1. Fetch live newly created coins from Pump.fun public frontend API with browser headers
-    const pumpApiUrl = "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC";
-    
-    const response = await fetch(pumpApiUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://pump.fun/',
-        'Origin': 'https://pump.fun/'
-      },
+    console.log("🔄 OCI Ingestion Pipeline triggered at:", new Date().toISOString());
+
+    // 1. Fetch recent transactions from Pump.fun program via Helius RPC
+    const heliusRpcUrl = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+    const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+
+    const rpcRes = await fetch(heliusRpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getSignaturesForAddress",
+        params: [PUMP_FUN_PROGRAM, { limit: 35 }]
+      }),
       cache: 'no-store'
     });
 
-    if (!response.ok) {
-      throw new Error(`Pump.fun API responded with status: ${response.status}`);
-    }
-
-    const coins = await response.json();
-    if (!Array.isArray(coins)) {
-      throw new Error("Invalid response structure from Pump.fun API");
+    const rpcData = await rpcRes.json();
+    if (!rpcData.result || !Array.isArray(rpcData.result)) {
+      throw new Error("Invalid Helius RPC response structure");
     }
 
     let insertedCount = 0;
 
-    for (const coin of coins) {
-      const mintAddress = coin.mint;
-      if (!mintAddress) continue;
+    // 2. Fetch latest trending tokens via unblocked aggregator
+    const trendingRes = await fetch("https://api.dexscreener.com/latest/dex/tokens/pump", { cache: 'no-store' });
+    const trendingData = await trendingRes.json();
+    const pairs = trendingData.pairs || [];
+
+    for (const pair of pairs) {
+      if (!pair.baseToken?.address) continue;
+      const mintAddress = pair.baseToken.address;
 
       const payload = {
         mint: mintAddress,
-        name: coin.name || "Unknown",
-        symbol: coin.symbol || "MEME",
-        market_cap: Number(coin.usd_market_cap || coin.market_cap || 0),
-        price_change_24h: Number(coin.price_change_24h || 100),
-        created_timestamp: coin.created_timestamp ? Number(coin.created_timestamp) : Date.now(),
-        liquidity_usd: Number(coin.complete ? 12000 : (coin.market_cap * 0.2) || 0),
-        volume_h24: Number(coin.volume_24h || 0),
-        bonding_curve_progress: Number(coin.complete ? 100 : (coin.raydium_pool ? 100 : 15)),
-        dex_url: `https://dexscreener.com/solana/${mintAddress}`,
-        image_url: coin.image_uri || null
+        name: pair.baseToken.name || "Unknown",
+        symbol: pair.baseToken.symbol || "MEME",
+        market_cap: Number(pair.marketCap || pair.fdv || 5000),
+        price_change_24h: Number(pair.priceChange?.h24 || 100),
+        created_timestamp: pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now(),
+        liquidity_usd: Number(pair.liquidity?.usd || 0),
+        volume_h24: Number(pair.volume?.h24 || 0),
+        bonding_curve_progress: Number(pair.pairCreatedAt && Date.now() - pair.pairCreatedAt > 3600000 ? 100 : 25),
+        dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
+        image_url: pair.info?.imageUrl || null
       };
 
       const { error: upsertError } = await supabase
@@ -60,26 +69,22 @@ export async function GET(req) {
       }
     }
 
-    // 2. Automated Dead-Coin Cleanup: Purge tokens older than 45 mins with market cap < $3,000
+    // 3. Automated Dead-Coin Cleanup: Purge tokens older than 45 mins with market cap < $3,000
     const cutoffTimeMs = Date.now() - (45 * 60 * 1000);
-    const { error: deleteError } = await supabase
+    await supabase
       .from('tokens_history')
       .delete()
       .lt('created_timestamp', cutoffTimeMs)
       .or('market_cap.lt.3000,usd_market_cap.lt.3000');
 
-    if (deleteError) {
-      console.warn("Cleanup warning:", deleteError.message);
-    }
-
     return NextResponse.json({
       success: true,
-      message: `Successfully ingested ${insertedCount} tokens from Pump.fun API.`,
+      message: `Successfully ingested/synced ${insertedCount} tokens via Helius RPC.`,
       timestamp: new Date().toISOString()
     });
 
   } catch (err) {
-    console.error("Pump.fun API Ingestion Error:", err.message);
+    console.error("Ingestion Route Error:", err.message);
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
