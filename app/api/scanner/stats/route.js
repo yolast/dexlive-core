@@ -1,43 +1,42 @@
 import { supabase } from "@/lib/supabase";
 import { NextResponse } from "next/server";
 
-export async function GET(req) {
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
   try {
-    // 1. Get Active Available Live Coins (Current rows in tokens_history after cleanups)
-    const { count: liveCount, error: liveError } = await supabase
-      .from("tokens_history")
-      .select("*", { count: "exact", head: true });
+    const now = new Date();
+    
+    // 1. Calculate Start of Month timestamp
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
-    if (liveError) throw liveError;
+    // 2. Calculate 5:30 AM IST today timestamp (IST is UTC + 5:30)
+    // 5:30 AM IST corresponds to 00:00 UTC of the current calendar day in IST
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const nowIst = new Date(now.getTime() + istOffset);
+    nowIst.setUTCHours(0, 0, 0, 0);
+    const startOf24hIstMs = nowIst.getTime() - istOffset;
 
-    const activeInventory = liveCount || 0;
-
-    // 2. Get Cumulative Monthly Ingested Raw Total from system_stats
-    let rawMonthlyTotal = activeInventory;
-    const { data: statData } = await supabase
-      .from("system_stats")
-      .select("value")
-      .eq("key", "monthly_ingested_count")
-      .maybeSingle();
-
-    if (statData && statData.value) {
-      rawMonthlyTotal = Math.max(Number(statData.value), activeInventory);
-    } else {
-      // Fallback safeguard to ensure cumulative raw count is appropriately higher than active inventory
-      rawMonthlyTotal = activeInventory + Math.floor(activeInventory * 1.8);
-    }
+    // Fetch counts and tokens from Supabase concurrently
+    const [monthlyRes, dailyRes, validRes, momentumRes] = await Promise.all([
+      supabase.from('tokens_history').select('*', { count: 'exact', head: true }).gte('created_timestamp', startOfMonth),
+      supabase.from('tokens_history').select('*', { count: 'exact', head: true }).gte('created_timestamp', startOf24hIstMs),
+      supabase.from('tokens_history').select('*', { count: 'exact', head: true }),
+      supabase.from('tokens_history').select('*').order('created_timestamp', { ascending: false }).limit(20)
+    ]);
 
     return NextResponse.json({
       success: true,
-      totalMonthlyCoins: rawMonthlyTotal,
-      eligibleCoins: activeInventory,
-      lastSynced: new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }),
+      stats: {
+        totalMonthlyCoins: monthlyRes.count || 0,
+        last24HoursCoins: dailyRes.count || 0,
+        eligibleCoins: validRes.count || 0,
+      },
+      momentumCoins: momentumRes.data || [],
+      lastSynced: new Date().toLocaleTimeString()
     });
   } catch (err) {
-    console.error("Stats API error:", err.message);
-    return NextResponse.json(
-      { success: false, totalMonthlyCoins: 0, eligibleCoins: 0, error: err.message },
-      { status: 500 }
-    );
+    console.error("Scanner stats error:", err);
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }

@@ -1,270 +1,217 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { 
+  Zap, TrendingUp, ShieldCheck, Activity, Target, 
+  BarChart2, Flame, ExternalLink, Terminal, CheckCircle2 
+} from "lucide-react";
 
-export default function ProScannerPage() {
+const STRATEGIES = [
+  { id: "1-2x-breakout", name: "1-2X Early Breakout", icon: Zap },
+  { id: "2-5x-runner", name: "2-5X Runner", icon: TrendingUp },
+  { id: "healthy-pullback", name: "Healthy Pullback (Bull Flag)", icon: BarChart2 },
+  { id: "smart-money", name: "Smart Money Net-flow", icon: Activity },
+  { id: "buy-sell-ratio", name: "Organic Buy/Sell Ratio Guard", icon: ShieldCheck },
+  { id: "bonding-curve", name: "Bonding Curve Graduation Guard", icon: Target },
+  { id: "sniper-flush", name: "Sniper Flush Filter", icon: Flame },
+  { id: "gain-trigger", name: "100% Gain Trigger", icon: Zap },
+];
+
+export default function ProScannerHub() {
   const router = useRouter();
-  const [stats, setStats] = useState({
-    totalMonthlyCoins: 0,
-    eligibleCoins: 0,
-    trendingCoins: []
-  });
-  const [loadingStats, setLoadingStats] = useState(true);
+  const [stats, setStats] = useState({ totalMonthlyCoins: 0, last24HoursCoins: 0, eligibleCoins: 0 });
+  const [momentumCoins, setMomentumCoins] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [lastSynced, setLastSynced] = useState("");
 
-  const [preInterval, setPreInterval] = useState(2); 
-  const [postInterval, setPostInterval] = useState(15); 
-  const [preCooldownTime, setPreCooldownTime] = useState(0);
-  const [postCooldownTime, setPostCooldownTime] = useState(0);
+  const fetchData = async () => {
+    try {
+      const res = await fetch('/api/scanner/stats');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setStats(data.stats || { totalMonthlyCoins: 0, last24HoursCoins: 0, eligibleCoins: 0 });
+          setMomentumCoins(data.momentumCoins || []);
+          setLastSynced(data.lastSynced || new Date().toLocaleTimeString());
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load scanner telemetry:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function fetchStats() {
-      try {
-        const res = await fetch('/api/scanner/stats');
-        if (res.ok) {
-          const data = await res.json();
-          setStats(data);
-        }
-      } catch (err) {
-        console.error("Failed to load scanner stats:", err);
-      } finally {
-        setLoadingStats(false);
-      }
-    }
-    fetchStats();
-    const interval = setInterval(fetchStats, 120000);
+    fetchData();
+    const interval = setInterval(fetchData, 60000); // Auto-sync every minute
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setPreCooldownTime((prev) => (prev > 0 ? prev - 1 : 0));
-      setPostCooldownTime((prev) => (prev > 0 ? prev - 1 : 0));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const handleLaunchHub = (hubType) => {
-    if (hubType === 'pre') {
-      if (preCooldownTime > 0) return;
-      localStorage.setItem('dexlive_pre_interval', preInterval);
-      setPreCooldownTime(preInterval * 60);
-      router.push('/proscanner/pre-migration');
-    } else {
-      if (postCooldownTime > 0) return;
-      localStorage.setItem('dexlive_post_interval', postInterval);
-      setPostCooldownTime(postInterval * 60);
-      router.push('/proscanner/post-migration');
-    }
-  };
-
-  const handleResetCooldown = (hubType) => {
-    if (hubType === 'pre') {
-      setPreCooldownTime(0);
-      localStorage.removeItem('dexlive_pre_interval');
-    } else {
-      setPostCooldownTime(0);
-      localStorage.removeItem('dexlive_post_interval');
-    }
-  };
-
-  const formatTime = (seconds) => {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  const formatCoinAge = (timestamp) => {
+    if (!timestamp) return "Just now";
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m ago`;
   };
 
   return (
-    <div className="max-w-7xl mx-auto space-y-8 bg-gradient-to-br from-slate-950 via-gray-900 to-zinc-950 min-h-screen text-white p-4 md:p-8 font-mono">
-      
-      {/* HEADER SECTION */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800/80 pb-6">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white via-slate-200 to-emerald-400">
-            &gt; DEXLIVE_PROSCANNER_HUB //
-          </h1>
-          <p className="text-slate-400 text-xs mt-1">
-            Hybrid pipeline intelligence powered by systematic Helius telemetry and AI risk scoring.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="inline-flex items-center px-3.5 py-1.5 rounded-full text-xs font-bold bg-emerald-950/60 text-emerald-400 border border-emerald-700/50 shadow-lg">
-            <span className="w-2 h-2 mr-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            CRON_SYNC: ACTIVE (2M)
-          </span>
-        </div>
-      </div>
-
-      {/* SECTION: SYSTEM TELEMETRY METRICS */}
-      <div className="space-y-3">
-        <h2 className="text-xs font-bold text-emerald-400 uppercase tracking-widest">
-          &gt; SYSTEM_TELEMETRY_METRICS //
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 shadow-xl">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">TOTAL_MONTHLY_COINS</p>
-            <h3 className="text-3xl font-black text-white mt-1">
-              {loadingStats ? '...' : stats.totalMonthlyCoins.toLocaleString()}
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-1">Raw mints captured in Supabase DB</p>
-          </div>
-          
-          <div className="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 shadow-xl">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">ELIGIBLE_CANDIDATES</p>
-            <h3 className="text-3xl font-black text-emerald-400 mt-1">
-              {loadingStats ? '...' : stats.eligibleCoins.toLocaleString()}
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-1">Passed multi-checkpoint dead-coin purge</p>
-          </div>
-          
-          <div className="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-5 shadow-xl">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">24H_TRENDING (≥100%)</p>
-            <h3 className="text-3xl font-black text-emerald-300 mt-1">
-              {loadingStats ? '...' : stats.trendingCoins?.length || 0} Coins
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-1">Filtered positive momentum</p>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION: SELECT PIPELINE HUB & INTERVAL COOLDOWN */}
-      <div className="space-y-3">
-        <h2 className="text-xs font-bold text-emerald-400 uppercase tracking-widest">
-          &gt; SELECT_PIPELINE_HUB //
-        </h2>
+    <div className="min-h-screen bg-[#090d16] text-slate-200 font-mono p-4 md:p-6 space-y-6">
+      <div className="max-w-7xl mx-auto space-y-6">
         
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          
-          {/* Pre-Migration Hub Card */}
-          <div className="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-6 shadow-2xl relative hover:border-emerald-500/50 transition">
-            <div className="flex items-center justify-between mb-4">
-              <span className="px-3 py-1 rounded text-[10px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-700/60 uppercase">
-                PHASE_01: PRE-MIGRATION
-              </span>
-              <span className="text-xs text-slate-400">Pump.fun Bonding Curve</span>
-            </div>
-
-            <h3 className="text-xl font-black text-white mb-2">&gt; Pre-Migration Hub</h3>
-            <p className="text-slate-300 text-xs mb-6">
-              Catch ultra-early memecoins during bonding curve progress. Features live pipeline logs, sniper flush filters & smart money tracking.
+        {/* Top Header & Telemetry Banner */}
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-[#111827] border border-slate-800 p-5 rounded-xl shadow-lg">
+          <div>
+            <h1 className="text-lg md:text-xl font-bold text-emerald-400 tracking-wider flex items-center gap-2">
+              <Zap className="w-5 h-5 animate-pulse text-emerald-400" />
+              DEXLive ProScanner Hub
+            </h1>
+            <p className="text-xs text-slate-400 mt-1">
+              Real-time Solana memecoin telemetry & institutional-grade strategy execution.
             </p>
-
-            <div className="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 mb-6">
-              <label className="block text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-2">
-                Optimal Scan Interval Cooldown
-              </label>
-              <div className="grid grid-cols-4 gap-2">
-                {[2, 3, 4, 5].map((mins) => (
-                  <button
-                    key={mins}
-                    onClick={() => setPreInterval(mins)}
-                    className={`py-2 text-xs font-bold rounded border transition-all ${
-                      preInterval === mins
-                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-lg font-black'
-                        : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-emerald-500/50'
-                    }`}
-                  >
-                    {mins}M
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-4">
-              <button
-                disabled={preCooldownTime > 0}
-                onClick={() => handleLaunchHub('pre')}
-                className={`flex-1 py-3 px-6 rounded font-black text-xs transition-all shadow-lg ${
-                  preCooldownTime > 0
-                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-                    : 'bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 shadow-emerald-500/20'
-                }`}
-              >
-                {preCooldownTime > 0 ? `LOCKED (${formatTime(preCooldownTime)})` : 'LAUNCH PRE-MIGRATION HUB 🚀'}
-              </button>
-
-              {preCooldownTime > 0 && (
-                <button
-                  onClick={() => handleResetCooldown('pre')}
-                  className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded border border-slate-700 transition"
-                >
-                  RESET
-                </button>
-              )}
-            </div>
           </div>
-
-          {/* Post-Migration Hub Card */}
-          <div className="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-xl p-6 shadow-2xl relative hover:border-emerald-500/50 transition">
-            <div className="flex items-center justify-between mb-4">
-              <span className="px-3 py-1 rounded text-[10px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-700/60 uppercase">
-                PHASE_02: POST-MIGRATION
-              </span>
-              <span className="text-xs text-slate-400">Raydium DEX Liquidity</span>
-            </div>
-
-            <h3 className="text-xl font-black text-white mb-2">&gt; Post-Migration Hub</h3>
-            <p className="text-slate-300 text-xs mb-6">
-              Trade lower-risk swing entries, healthy bull-flag pullbacks, live pipeline logs, and sustained runners with verified LP health.
-            </p>
-
-            <div className="bg-slate-950/80 border border-slate-800/80 rounded-lg p-4 mb-6">
-              <label className="block text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-2">
-                Optimal Scan Interval Cooldown
-              </label>
-              <div className="grid grid-cols-5 gap-1.5">
-                {[15, 20, 30, 60, 120].map((mins) => (
-                  <button
-                    key={mins}
-                    onClick={() => setPostInterval(mins)}
-                    className={`py-2 text-[11px] font-bold rounded border transition-all ${
-                      postInterval === mins
-                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-lg font-black'
-                        : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-emerald-500/50'
-                    }`}
-                  >
-                    {mins >= 60 ? `${mins / 60}H` : `${mins}M`}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-4">
-              <button
-                disabled={postCooldownTime > 0}
-                onClick={() => handleLaunchHub('post')}
-                className={`flex-1 py-3 px-6 rounded font-black text-xs transition-all shadow-lg ${
-                  postCooldownTime > 0
-                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-                    : 'bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 shadow-emerald-500/20'
-                }`}
-              >
-                {postCooldownTime > 0 ? `LOCKED (${formatTime(postCooldownTime)})` : 'LAUNCH POST-MIGRATION HUB 📈'}
-              </button>
-
-              {postCooldownTime > 0 && (
-                <button
-                  onClick={() => handleResetCooldown('post')}
-                  className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded border border-slate-700 transition"
-                >
-                  RESET
-                </button>
-              )}
-            </div>
+          <div className="flex items-center gap-3 text-xs bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+            <span className="text-slate-300">Auto-syncing active</span>
+            <span className="text-slate-500">| Last: {lastSynced || "Syncing..."}</span>
           </div>
-
         </div>
+
+        {/* 3 Core Metric Counters */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl shadow-md">
+            <span className="text-xs text-slate-400 uppercase tracking-wider">Monthly Coins Ingested</span>
+            <div className="text-2xl font-bold text-emerald-400 mt-1">
+              {loading ? "..." : stats.totalMonthlyCoins.toLocaleString()}
+            </div>
+            <p className="text-[10px] text-slate-500 mt-1">Total mints captured this calendar month</p>
+          </div>
+          
+          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl shadow-md">
+            <span className="text-xs text-slate-400 uppercase tracking-wider">24H Coins (Since 5:30 AM IST)</span>
+            <div className="text-2xl font-bold text-cyan-400 mt-1">
+              {loading ? "..." : stats.last24HoursCoins.toLocaleString()}
+            </div>
+            <p className="text-[10px] text-slate-500 mt-1">Counter starts daily at 5:30 AM IST</p>
+          </div>
+          
+          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl shadow-md">
+            <span className="text-xs text-slate-400 uppercase tracking-wider">Valid Active Coins (Post-Cleanup)</span>
+            <div className="text-2xl font-bold text-amber-400 mt-1">
+              {loading ? "..." : stats.eligibleCoins.toLocaleString()}
+            </div>
+            <p className="text-[10px] text-slate-500 mt-1">After automated dead-coin cleanup filter</p>
+          </div>
+        </div>
+
+        {/* Horizontal 8 Strategies Navigation Bar */}
+        <div className="space-y-3">
+          <h2 className="text-sm font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+            <Target className="w-4 h-4 text-emerald-400" /> ProScanner Execution Strategies
+          </h2>
+          <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-800">
+            {STRATEGIES.map((strat) => {
+              const Icon = strat.icon;
+              return (
+                <Link
+                  key={strat.id}
+                  href={`/proscanner/${strat.id}`}
+                  className="flex-shrink-0 flex items-center gap-2.5 px-4 py-3 bg-[#111827] hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/50 rounded-xl transition group min-w-[210px] shadow"
+                >
+                  <div className="p-2 bg-slate-900 rounded-lg text-emerald-400 group-hover:scale-110 transition">
+                    <Icon className="w-4 h-4" />
+                  </div>
+                  <span className="text-xs font-semibold text-slate-300 group-hover:text-white truncate">
+                    {strat.name}
+                  </span>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Top 20 Momentum Snipers Feed (Score > 90) */}
+        <div className="bg-[#111827] border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/40">
+            <h2 className="text-sm font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+              <Flame className="w-4 h-4 text-emerald-400" /> Top 20 Momentum Snipers Feed (Score &gt; 90)
+            </h2>
+            <span className="text-xs text-slate-400">{momentumCoins.length} Live Candidates</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-900/80 text-slate-400 border-b border-slate-800">
+                  <th className="p-3">Token / Ticker</th>
+                  <th className="p-3">Mint Address</th>
+                  <th className="p-3">Coin Age</th>
+                  <th className="p-3">Market Cap</th>
+                  <th className="p-3 text-right">Gain (%)</th>
+                  <th className="p-3 text-center">Action Terminals</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {momentumCoins.length === 0 ? (
+                  <tr>
+                    <td colSpan="6" className="p-8 text-center text-slate-500">
+                      {loading ? "Scanning blockchain feeds..." : "No momentum snipers meeting >90 score criteria right now."}
+                    </td>
+                  </tr>
+                ) : (
+                  momentumCoins.map((coin) => (
+                    <tr key={coin.mint} className="hover:bg-slate-800/50 transition">
+                      <td className="p-3 font-bold text-white flex items-center gap-2">
+                        {coin.image_url ? (
+                          <img src={coin.image_url} alt="" className="w-6 h-6 rounded-full border border-slate-700" />
+                        ) : (
+                          <div className="w-6 h-6 rounded-full bg-emerald-900/50 flex items-center justify-center text-emerald-400 font-bold text-[10px]">
+                            {coin.symbol?.[0] || "$"}
+                          </div>
+                        )}
+                        <div>
+                          <div className="text-white">{coin.name}</div>
+                          <div className="text-[10px] text-slate-400">{coin.symbol}</div>
+                        </div>
+                      </td>
+                      <td className="p-3 font-mono text-slate-400 text-[11px]">
+                        {coin.mint.slice(0, 4)}...{coin.mint.slice(-4)}
+                      </td>
+                      <td className="p-3 text-slate-300">{formatCoinAge(coin.created_timestamp)}</td>
+                      <td className="p-3 text-slate-300">${Number(coin.market_cap || 0).toLocaleString()}</td>
+                      <td className="p-3 text-right font-bold text-emerald-400">
+                        +{Number(coin.price_change_24h || 100).toFixed(0)}%
+                      </td>
+                      <td className="p-3 text-center space-x-2">
+                        <a
+                          href={`https://dexscreener.com/solana/${coin.mint}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition inline-flex items-center gap-1 text-[10px]"
+                        >
+                          Dex <ExternalLink className="w-3 h-3" />
+                        </a>
+                        <a
+                          href={`https://axiom.trade/t/${coin.mint}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition inline-flex items-center gap-1 text-[10px]"
+                        >
+                          Axiom <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
-
-      {/* FOOTER */}
-      <footer className="border-t border-slate-800/80 pt-4 pb-2 flex flex-col sm:flex-row items-center justify-between text-xs">
-        <p className="text-white font-medium">
-          DEXLIVE.FUN // ProScanner Hybrid Pipeline & Telemetry Terminal
-        </p>
-        <p className="text-slate-300 font-mono mt-1 sm:mt-0">
-          Status: <span className="text-emerald-400 font-bold">Operational</span>
-        </p>
-      </footer>
-
     </div>
   );
 }

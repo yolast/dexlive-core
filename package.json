@@ -13,6 +13,7 @@
     "@clerk/themes": "^2.4.57",
     "@google/genai": "^2.15.0",
     "@supabase/supabase-js": "^2.111.0",
+    "lucide-react": "^1.30.0",
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4",

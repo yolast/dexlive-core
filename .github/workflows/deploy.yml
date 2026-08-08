@@ -1,34 +1,14 @@
-name: Build and Deploy to OCI
+name: Deploy to OCI Production
 
 on:
   push:
     branches: [ main ]
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.x'
-          cache: 'npm'
-
-      - name: Install Dependencies & Build
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-        run: |
-          npm ci
-          npm run build
-
       - name: Deploy to OCI via SSH
         uses: appleboy/ssh-action@master
         with:
@@ -37,10 +17,20 @@ jobs:
           key: ${{ secrets.OCI_SSH_KEY }}
           script: |
             cd ~/dexlive
+            
+            # Pull latest changes from GitHub main
             git fetch origin main
             git reset --hard origin/main
+            
+            # Install dependencies and compile Next.js build
             npm ci --prefer-offline
             npm run build
-            pm2 reload all
+            
+            # Ensure PM2 is in PATH (adjust if using NVM)
+            export PATH=$PATH:/usr/local/bin:/usr/bin
+            
+            # Reload application with zero downtime & save process list
+            pm2 reload all || pm2 restart all
             pm2 save
             
+            echo "✅ Deployment to OCI completed successfully!"
