@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 
 const STRATEGIES = [
-  { id: "1-2x-breakout", name: "1-2X Early Breakout", icon: Zap },
+  { id: "1-2x-breakout", name: "15S Momentum Snipers", icon: Zap },
   { id: "2-5x-runner", name: "2-5X Runner", icon: TrendingUp },
   { id: "healthy-pullback", name: "Healthy Pullback (Bull Flag)", icon: BarChart2 },
   { id: "smart-money", name: "Smart Money Net-flow", icon: Activity },
@@ -76,8 +76,8 @@ export default function ProScannerHub() {
           </div>
           <div className="flex items-center gap-3 text-xs bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-            <span className="text-slate-300">Auto-syncing active</span>
-            <span className="text-slate-500">| Last: {lastSynced || "Syncing..."}</span>
+            <span className="text-slate-300">Auto-syncing</span>
+            <span className="text-slate-500">| Last {lastSynced || "Syncing..."}</span>
           </div>
         </div>
 

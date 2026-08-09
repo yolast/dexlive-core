@@ -3,24 +3,18 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { 
-  Zap, TrendingUp, ShieldCheck, Activity, Target, 
-  BarChart2, RefreshCw, ExternalLink, Flame, Clock 
+  Zap, ExternalLink, Target, Flame
 } from "lucide-react";
 
+// Reduced to single active strategy as requested
 const STRATEGIES = [
-  { id: "1-2x-breakout", name: "1-2X Early Breakout", icon: Zap },
-  { id: "2-5x-runner", name: "2-5X Runner", icon: TrendingUp },
-  { id: "healthy-pullback", name: "Healthy Pullback (Bull Flag)", icon: BarChart2 },
-  { id: "smart-money", name: "Smart Money Net-flow", icon: Activity },
-  { id: "buy-sell-ratio", name: "Organic Buy/Sell Ratio Guard", icon: ShieldCheck },
-  { id: "bonding-curve", name: "Bonding Curve Graduation Guard", icon: Target },
-  { id: "sniper-flush", name: "Sniper Flush Filter", icon: Flame },
-  { id: "gain-trigger", name: "100% Gain Trigger", icon: Zap },
+  { id: "1-2x-breakout", name: "15S Momentum Snipers", icon: Zap }
 ];
 
 export default function ProScannerHome() {
   const router = useRouter();
-  const [stats, setStats] = useState({ totalMonthlyCoins: 0, last24HoursCoins: 0, eligibleCoins: 0 });
+  // Updated state keys to match the new API funnel stats
+  const [stats, setStats] = useState({ todayCoins: 0, dex24hCoins: 0, validCoins: 0 });
   const [momentumCoins, setMomentumCoins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastSynced, setLastSynced] = useState("");
@@ -32,7 +26,7 @@ export default function ProScannerHome() {
       if (data.success) {
         setStats(data.stats);
         setMomentumCoins(data.momentumCoins || []);
-        setLastSynced(data.lastSynced);
+        setLastSynced(data.lastSynced || new Date().toLocaleTimeString());
       }
     } catch (err) {
       console.error("Failed to load scanner stats", err);
@@ -43,7 +37,7 @@ export default function ProScannerHome() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 120000); // Auto-sync every 2 minutes
+    const interval = setInterval(fetchData, 60000); 
     return () => clearInterval(interval);
   }, []);
 
@@ -58,9 +52,10 @@ export default function ProScannerHome() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-200 font-mono p-4 md:p-6">
-      {/* Top Header & Telemetry Banner */}
+    <div className="min-h-screen bg-[#090d16] text-slate-200 font-mono p-4 md:p-6 space-y-6">
       <div className="max-w-7xl mx-auto space-y-6">
+        
+        {/* Top Header & Telemetry Banner */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-[#111827] border border-slate-800 p-5 rounded-xl shadow-lg">
           <div>
             <h1 className="text-lg md:text-xl font-bold text-emerald-400 tracking-wider flex items-center gap-2">
@@ -73,34 +68,43 @@ export default function ProScannerHome() {
           </div>
           <div className="flex items-center gap-3 text-xs bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-            <span className="text-slate-300">Auto-syncing every 2m</span>
-            <span className="text-slate-500">| Last: {lastSynced || "Syncing..."}</span>
+            <span className="text-slate-300">Auto-syncing</span>
+            <span className="text-slate-500">| Last {lastSynced || "Syncing..."}</span>
           </div>
         </div>
 
-        {/* 3 Core Metric Counters */}
+        {/* 3 Core Metric Counters (Updated Labels & Logic) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl">
-            <span className="text-xs text-slate-400 uppercase tracking-wider">Monthly Coins Ingested</span>
+          
+          {/* STAGE 1: Raw WebSocket Count */}
+          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl shadow-md">
+            <span className="text-xs text-slate-400 uppercase tracking-wider">Today Coins Ingested</span>
             <div className="text-2xl font-bold text-emerald-400 mt-1">
-              {loading ? "..." : stats.totalMonthlyCoins.toLocaleString()}
+              {loading ? "..." : (stats.todayCoins || 0).toLocaleString()}
             </div>
+            <p className="text-[10px] text-slate-500 mt-1">Total live coins fetched from WebSocket today</p>
           </div>
-          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl">
-            <span className="text-xs text-slate-400 uppercase tracking-wider">24H Coins (Since 5:30 AM IST)</span>
+          
+          {/* STAGE 2: DEXScreener Indexed Count */}
+          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl shadow-md">
+            <span className="text-xs text-slate-400 uppercase tracking-wider">24H DEX Coins (Since 5:30 AM IST)</span>
             <div className="text-2xl font-bold text-cyan-400 mt-1">
-              {loading ? "..." : stats.last24HoursCoins.toLocaleString()}
+              {loading ? "..." : (stats.dex24hCoins || 0).toLocaleString()}
             </div>
+            <p className="text-[10px] text-slate-500 mt-1">Confirmed & indexed on DEXScreener.com</p>
           </div>
-          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl">
-            <span className="text-xs text-slate-400 uppercase tracking-wider">Valid Active Coins (Post-Cleanup)</span>
+          
+          {/* STAGE 3: Surviving Filtered Coins */}
+          <div className="bg-[#111827] border border-slate-800 p-4 rounded-xl shadow-md">
+            <span className="text-xs text-slate-400 uppercase tracking-wider">Valid DexLive Coins (Post-Cleanup)</span>
             <div className="text-2xl font-bold text-amber-400 mt-1">
-              {loading ? "..." : stats.eligibleCoins.toLocaleString()}
+              {loading ? "..." : (stats.validCoins || 0).toLocaleString()}
             </div>
+            <p className="text-[10px] text-slate-500 mt-1">Surviving strict dead-coin checkpoint filters</p>
           </div>
         </div>
 
-        {/* Horizontal 8 Strategies Navigation Bar */}
+        {/* Single Strategy Execution Bar */}
         <div className="space-y-3">
           <h2 className="text-sm font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
             <Target className="w-4 h-4 text-emerald-400" /> ProScanner Execution Strategies
@@ -112,7 +116,7 @@ export default function ProScannerHome() {
                 <Link
                   key={strat.id}
                   href={`/proscanner/${strat.id}`}
-                  className="flex-shrink-0 flex items-center gap-2 px-4 py-3 bg-[#111827] hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/50 rounded-xl transition group min-w-[200px]"
+                  className="flex-shrink-0 flex items-center gap-2.5 px-4 py-3 bg-[#111827] hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/50 rounded-xl transition group min-w-[210px] shadow"
                 >
                   <div className="p-2 bg-slate-900 rounded-lg text-emerald-400 group-hover:scale-110 transition">
                     <Icon className="w-4 h-4" />
@@ -126,18 +130,21 @@ export default function ProScannerHome() {
           </div>
         </div>
 
-        {/* Top 20 Momentum Snipers Feed (Score > 90) */}
+        {/* Top Performing DEX Coins Feed */}
         <div className="bg-[#111827] border border-slate-800 rounded-xl overflow-hidden shadow-xl">
-          <div className="p-4 border-b border-slate-800 flex justify-between items-center">
-            <h2 className="text-sm font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
-              <Flame className="w-4 h-4 text-emerald-400" /> Top 20 Momentum Snipers (Score &gt; 90)
-            </h2>
+          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/40">
+            <div>
+              <h2 className="text-sm font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+                <Flame className="w-4 h-4 text-emerald-400" /> Top Performing DEX Coins (+100% Gainers)
+              </h2>
+              <p className="text-[10px] text-slate-500 mt-1">Resets daily at 5:30 AM IST</p>
+            </div>
             <span className="text-xs text-slate-400">{momentumCoins.length} Live Candidates</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs">
               <thead>
-                <tr className="bg-slate-900 text-slate-400 border-b border-slate-800">
+                <tr className="bg-slate-900/80 text-slate-400 border-b border-slate-800">
                   <th className="p-3">Token / Ticker</th>
                   <th className="p-3">Mint Address</th>
                   <th className="p-3">Coin Age</th>
@@ -149,8 +156,8 @@ export default function ProScannerHome() {
               <tbody className="divide-y divide-slate-800/60">
                 {momentumCoins.length === 0 ? (
                   <tr>
-                    <td colSpan="6" className="p-6 text-center text-slate-500">
-                      {loading ? "Scanning blockchain feeds..." : "No momentum snipers meeting >90 score criteria right now."}
+                    <td colSpan="6" className="p-8 text-center text-slate-500">
+                      {loading ? "Scanning blockchain feeds..." : "No new coins detected in the current window."}
                     </td>
                   </tr>
                 ) : (
@@ -161,11 +168,11 @@ export default function ProScannerHome() {
                           <img src={coin.image_url} alt="" className="w-6 h-6 rounded-full border border-slate-700" />
                         ) : (
                           <div className="w-6 h-6 rounded-full bg-emerald-900/50 flex items-center justify-center text-emerald-400 font-bold text-[10px]">
-                            {coin.symbol?.[0]}
+                            {coin.symbol?.[0] || "$"}
                           </div>
                         )}
                         <div>
-                          <div>{coin.name}</div>
+                          <div className="text-white">{coin.name}</div>
                           <div className="text-[10px] text-slate-400">{coin.symbol}</div>
                         </div>
                       </td>
@@ -202,6 +209,7 @@ export default function ProScannerHome() {
             </table>
           </div>
         </div>
+
       </div>
     </div>
   );
