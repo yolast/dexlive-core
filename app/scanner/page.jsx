@@ -28,6 +28,7 @@ export default function ProScannerHome() {
       const data = await res.json();
       if (data.success) {
         setStats(data.stats);
+        // We trust the backend route.js to send the dynamically scored top 20 coins
         setMomentumCoins(data.momentumCoins || []);
         setLastSynced(data.lastSynced || new Date().toLocaleTimeString());
       }
@@ -40,7 +41,8 @@ export default function ProScannerHome() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 60000); 
+    // 🔴 CRITICAL FIX: Changed from 60000ms to 10000ms (10s) for the 15S strategy!
+    const interval = setInterval(fetchData, 10000); 
     return () => clearInterval(interval);
   }, []);
 
@@ -168,7 +170,7 @@ export default function ProScannerHome() {
               <h2 className="text-sm font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
                 <Flame className="w-4 h-4 text-emerald-400" /> 15S Momentum Snipers (Early Entry)
               </h2>
-              <p className="text-[10px] text-slate-500 mt-1">Filtering absolute freshest DEX pairs via SYS Score &gt; 40/70</p>
+              <p className="text-[10px] text-slate-500 mt-1">Filtering absolute freshest DEX pairs via SYS Score &gt; 25/70</p>
             </div>
             <span className="text-xs text-slate-400">{momentumCoins.length} Prime Candidates</span>
           </div>
@@ -219,12 +221,17 @@ export default function ProScannerHome() {
                         </td>
                         <td className="p-3 text-slate-300 whitespace-nowrap">{formatCoinAge(coin.created_timestamp)}</td>
                         <td className="p-3 text-slate-300">${Number(coin.market_cap || 0).toLocaleString()}</td>
+                        
+                        {/* 🔴 Ratio Visual Upgrade */}
                         <td className="p-3">
                           <div className="text-emerald-400">{coin.buys} Buys</div>
-                          <div className="text-red-400/80 text-[10px]">{coin.sells} Sells ({coin.ratio})</div>
+                          <div className="text-slate-500 text-[10px]">
+                            {coin.sells} Sells (<span className={coin.ratio >= 1.2 ? "text-emerald-400 font-bold" : "text-slate-400"}>{coin.ratio}x</span>)
+                          </div>
                         </td>
+                        
                         <td className="p-3 text-center">
-                          <div className={`text-lg font-bold ${totalScore >= 80 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                          <div className={`text-lg font-bold ${totalScore >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
                             {totalScore}
                           </div>
                           <div className="text-[9px] text-slate-500">

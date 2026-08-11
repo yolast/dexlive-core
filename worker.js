@@ -1,223 +1,130 @@
-import WebSocket from 'ws';
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
-
-dotenv.config({ path: '.env.local' });
+require('dotenv').config();
+const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws');
+const axios = require('axios');
 
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_URL, 
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 1. WebSocket Ingestion
-function startIngestion() {
-  console.log("🚀 Starting DEXLive Ingestion & Accelerated Pruner...");
-  const ws = new WebSocket('wss://pumpportal.fun/api/data');
+// PumpPortal WebSocket URL
+const PUMP_PORTAL_WS = 'wss://pumpportal.fun/api/data';
+
+// Connect to PumpPortal to listen for new mints
+function connectPumpPortal() {
+  const ws = new WebSocket(PUMP_PORTAL_WS);
 
   ws.on('open', () => {
     console.log('✅ Connected to PumpPortal WebSocket');
-    ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+    // Subscribe to new token creations
+    ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
   });
 
   ws.on('message', async (data) => {
     try {
-      const message = JSON.parse(data);
-      if (message.mint && message.name && message.symbol) {
-        console.log(`🔥 Ingested Token: ${message.name} (${message.symbol}) [${message.mint}]`);
-
-        await supabase.from("tokens_history").upsert(
-          {
-            mint: message.mint,
-            name: message.name,
-            symbol: message.symbol,
-            uri: message.uri || null,
-            trader_public_key: message.traderPublicKey || null,
-            signature: message.signature || null,
-            initial_buy: message.initialBuy || 0,
-            is_active: true,
+      const parsedData = JSON.parse(data);
+      
+      if (parsedData.mint) {
+        console.log(`🚀 New Token Minted: ${parsedData.mint}`);
+        
+        // 1. Save raw mint to DB immediately
+        const { error: insertError } = await supabase
+          .from('tokens_history')
+          .insert([{ 
+            mint: parsedData.mint, 
             is_verified: false,
-            created_at: new Date().toISOString()
-          },
-          { onConflict: "mint" }
-        );
+            is_active: false
+          }]);
+
+        if (insertError) {
+          console.error(`DB Insert Error for ${parsedData.mint}:`, insertError.message);
+          return;
+        }
+
+        // 2. Start checking DEXScreener with a delay for initial liquidity to pool
+        setTimeout(() => checkDexScreener(parsedData.mint), 15000); // 15-second delay
       }
     } catch (err) {
-      console.error("⚠️ Ingestion Error:", err);
+      console.error('Error parsing WebSocket message:', err);
     }
   });
 
   ws.on('close', () => {
-    console.log('❌ WebSocket disconnected. Reconnecting in 5s...');
-    setTimeout(startIngestion, 5000);
+    console.log('❌ PumpPortal WS disconnected. Reconnecting in 5s...');
+    setTimeout(connectPumpPortal, 5000);
   });
-  
-  ws.on('error', (err) => console.error('🔥 WS Error:', err.message));
 }
 
-// 2. Fast Dead-Coin & DEX Verification Evaluator (Runs every 3 seconds)
-async function evaluateTokens() {
+// Poll DexScreener to verify and map data
+async function checkDexScreener(mint, retries = 5) {
   try {
-    // Prioritize unverified tokens first, then active tokens
-    const { data: tokens, error } = await supabase
-      .from("tokens_history")
-      .select("mint, name, symbol, created_at, is_verified, initial_dex_price_usd, initial_liquidity_usd, ath_usd")
-      .eq("is_active", true)
-      .order("is_verified", { ascending: true }) // Unverified first
-      .limit(30);
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+    const data = res.data;
 
-    if (error || !tokens || tokens.length === 0) return;
+    if (data && data.pairs && data.pairs.length > 0) {
+      // Find the most active Solana pair (usually Raydium or Pumpfun)
+      const pair = data.pairs.find(p => p.chainId === 'solana') || data.pairs[0];
+      
+      const marketCap = pair.fdv || pair.marketCap || 0;
+      // Map the 5M data for momentum snipers, fallback to 24h if missing
+      const priceChange = pair.priceChange?.m5 || pair.priceChange?.h24 || 0; 
+      const buys = pair.txns?.m5?.buys || 0;
+      const sells = pair.txns?.m5?.sells || 0;
+      const volume = pair.volume?.m5 || 0;
 
-    const mints = tokens.map(t => t.mint);
-    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mints.join(',')}`);
-    if (!res.ok) return;
-
-    const data = await res.json();
-    const pairs = data.pairs || [];
-
-    for (const token of tokens) {
-      const ageMinutes = (Date.now() - new Date(token.created_at).getTime()) / (1000 * 60);
-      const matchedPair = pairs.find(p => p.baseToken?.address === token.mint && p.chainId === 'solana');
-
-      if (!matchedPair) {
-        if (ageMinutes > 15 || token.is_verified) {
-          await markDeadCoin(token.mint, `Unlisted / Missing from DEXScreener after 15m`);
-        }
-        continue;
+      // 🔴 WIDENED CHECKPOINTS: Let the frontend do the heavy sorting!
+      // - Market Cap: $3k to $500k (Captures fast movers blowing past $30k)
+      // - Minimum Buys: Dropped to 10 (Captures 15-second early snipes)
+      // - Buy/Sell Ratio: Removed the strict 2.0 block here. 
+      
+      if (marketCap < 3000 || marketCap > 500000) {
+        console.log(`[Filtered] ${mint} - Market Cap out of bounds: $${marketCap}`);
+        return null;
+      }
+      
+      if (buys < 10) {
+         console.log(`[Filtered] ${mint} - Not enough early buys: ${buys}`);
+         return null; 
       }
 
-      // Telemetry
-      const priceUsd = parseFloat(matchedPair.priceUsd || "0");
-      const liquidityUsd = matchedPair.liquidity?.usd || 0;
-      const volume1h = matchedPair.volume?.h1 || 0;
-      const priceChange5m = matchedPair.priceChange?.m5 || 0;
-      const priceChange1h = matchedPair.priceChange?.h1 || 0;
-      const priceChange24h = matchedPair.priceChange?.h24 || 0;
-      const marketCap = matchedPair.fdv || matchedPair.marketCap || 0;
+      console.log(`✅ [Verified] Momentum Coin Found! ${mint} | +${priceChange}% | MC: $${marketCap}`);
 
-      const buys1h = matchedPair.txns?.h1?.buys || 0;
-      const sells1h = matchedPair.txns?.h1?.sells || 0;
-      const totalTxns1h = buys1h + sells1h;
-      const buySellRatio1h = sells1h > 0 ? (buys1h / sells1h) : buys1h;
+      // 🟢 MAPPING REAL DATA: Send the exact m5 buys/sells to DB
+      const updateData = {
+        is_verified: true,
+        is_active: true,
+        name: pair.baseToken.name,
+        symbol: pair.baseToken.symbol,
+        market_cap_usd: marketCap,
+        price_change_24h: priceChange, // Storing m5/recent gain here so route.js scores it perfectly
+        uri: pair.info?.imageUrl || null,
+        buys: buys,
+        sells: sells,
+        volume: volume
+      };
 
-      const initialDexPrice = token.initial_dex_price_usd > 0 ? token.initial_dex_price_usd : priceUsd;
-      const initialLiquidity = token.initial_liquidity_usd > 0 ? token.initial_liquidity_usd : liquidityUsd;
-      const currentATH = Math.max(token.ath_usd || 0, priceUsd);
+      const { error: updateError } = await supabase
+        .from('tokens_history')
+        .update(updateData)
+        .eq('mint', mint);
 
-      // --- EVALUATE CHECKPOINTS ---
-
-      if (initialDexPrice > 0 && priceUsd < initialDexPrice) {
-        await markDeadCoin(token.mint, `Price ($${priceUsd}) dropped below starting price`);
-        continue;
-      }
-
-      if (ageMinutes > 15 && buySellRatio1h < 1.0) {
-        await markDeadCoin(token.mint, `Buy/Sell Ratio (${buySellRatio1h.toFixed(2)}) < 1.0`);
-        continue;
-      }
-
-      if (ageMinutes > 30 && buys1h < 50) {
-        await markDeadCoin(token.mint, `Unique Buyers (${buys1h}) < 50 in first 30m`);
-        continue;
-      }
-
-      if (ageMinutes > 15 && initialLiquidity > 0 && liquidityUsd <= initialLiquidity) {
-        await markDeadCoin(token.mint, `Liquidity failed to grow above initial`);
-        continue;
-      }
-
-      if (ageMinutes > 30 && Math.abs(priceChange5m) < 0.1 && Math.abs(priceChange1h) < 0.5) {
-        await markDeadCoin(token.mint, `Market Cap growth flat for 30m`);
-        continue;
-      }
-
-      if (ageMinutes > 60 && volume1h < 20000) {
-        await markDeadCoin(token.mint, `1H Volume ($${volume1h}) < $20,000 in first hour`);
-        continue;
-      }
-
-      if (ageMinutes > 60 && totalTxns1h < 50) {
-        await markDeadCoin(token.mint, `Transactions (${totalTxns1h}) < 50 in first hour`);
-        continue;
-      }
-
-      if (ageMinutes > 60 && buys1h < 30) {
-        await markDeadCoin(token.mint, `Holder growth stagnated`);
-        continue;
-      }
-
-      if (ageMinutes > 15 && volume1h > 0 && (volume1h / Math.max(1, totalTxns1h)) < 6) {
-        await markDeadCoin(token.mint, `No whale activity (No wallet > $300 buy proxy)`);
-        continue;
-      }
-
-      if (currentATH > 0 && priceUsd < currentATH * 0.50 && priceChange5m <= 0) {
-        await markDeadCoin(token.mint, `Price failed to recover after >50% dump`);
-        continue;
-      }
-
-      if (ageMinutes <= 60 && currentATH > 0 && priceUsd <= currentATH * 0.20) {
-        await markDeadCoin(token.mint, `ATH Retracement > 80% within first hour`);
-        continue;
-      }
-
-      // Passed checks: Mark verified & update metrics
-      await supabase
-        .from("tokens_history")
-        .update({
-          is_verified: true,
-          market_cap_usd: marketCap,
-          price_change_24h: priceChange24h,
-          name: matchedPair.baseToken?.name || token.name,
-          symbol: matchedPair.baseToken?.symbol || token.symbol,
-          initial_dex_price_usd: initialDexPrice,
-          initial_liquidity_usd: initialLiquidity,
-          ath_usd: currentATH,
-          last_updated_at: new Date().toISOString()
-        })
-        .eq("mint", token.mint);
+      if (updateError) console.error(`DB Update Error for ${mint}:`, updateError.message);
+      return; 
     }
-  } catch (error) {
-    console.error("⚠️ Evaluation Error:", error.message);
-  }
-}
-
-// Garbage Collector: Hard deletes yesterday's dead coins to save Supabase storage space
-async function purgeOldDeadCoins() {
-  try {
-    const now = new Date();
-    const today530AM_IST = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)).toISOString();
-
-    const { data, error } = await supabase
-      .from("tokens_history")
-      .delete()
-      .eq("is_active", false)
-      .lt("created_at", today530AM_IST)
-      .select("mint");
-
-    if (!error && data && data.length > 0) {
-      console.log(`🧹 Garbage Collector: Hard-deleted ${data.length} old dead coins.`);
+    
+    // Retry logic if token isn't indexed by DexScreener yet
+    if (retries > 0) {
+      console.log(`[Retry] ${mint} not found yet. Retrying in 10s... (${retries} left)`);
+      setTimeout(() => checkDexScreener(mint, retries - 1), 10000);
+    } else {
+      console.log(`[Dead] ${mint} failed to index after retries.`);
     }
+
   } catch (error) {
-    console.error("⚠️ Purge Error:", error.message);
+    console.error(`DexScreener API Error for ${mint}:`, error.message);
   }
 }
 
-// Soft Delete: Sets is_active = false so daily counters show funnel stats
-async function markDeadCoin(mint, reason) {
-  const { error } = await supabase
-    .from("tokens_history")
-    .update({ is_active: false })
-    .eq("mint", mint);
-
-  if (!error) {
-    console.log(`💀 MARKED DEAD [${mint}]: ${reason}`);
-  }
-}
-
-startIngestion();
-
-setTimeout(evaluateTokens, 2000);
-setTimeout(purgeOldDeadCoins, 5000);
-
-setInterval(evaluateTokens, 3000); // Check DEXScreener every 3 seconds
-setInterval(purgeOldDeadCoins, 60 * 60 * 1000); // Purge yesterday's dead coins every hour
+// Initialize
+connectPumpPortal();
