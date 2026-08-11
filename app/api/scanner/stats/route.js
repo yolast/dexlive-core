@@ -7,21 +7,21 @@ const supabase = createClient(
 );
 
 // Helper function to calculate the 70-Point Systematic Score
+// Handles both worker.js legacy columns (market_cap_usd, price_change_24h, uri, buys, sells, volume)
+// and cron route new columns (market_cap, price_change_h24, image_url, txns_m5_buys/m5_sells, volume_m5)
 function calculateSysScore(coin) {
   let score = 0;
-  const mc = coin.market_cap_usd || 0;
-  const gain = coin.price_change_24h || 0;
+  const mc = coin.market_cap_usd || coin.market_cap || 0;
+  const gain = coin.price_change_24h || coin.price_change_h24 || 0;
   
-  // Deterministic fallback for buys/sells if DB is still syncing
-  const charCodeCode = coin.mint ? coin.mint.charCodeAt(0) + coin.mint.charCodeAt(1) : 100;
-  const buys = coin.buys || (charCodeCode * 2 + Math.floor(Math.max(0, gain) / 10)); 
-  const sells = coin.sells || (charCodeCode + 10);
-  const ratio = sells > 0 ? (buys / sells) : buys;
+  const buys = coin.buys || coin.txns_m5_buys || 0;
+  const sells = coin.sells || coin.txns_m5_sells || 0;
+  const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
 
   // 🔴 1. THE RUG PENALTY (Instant Elimination)
   // If the token is negative (dumped below starting price) OR has massive sell pressure
   if (gain <= 0 || ratio < 0.8) {
-    return { sys_score: 0, buys, sells, ratio: ratio.toFixed(1) }; // Instant fail
+    return { sys_score: 0, buys, sells, ratio: ratio.toFixed(1) };
   }
 
   // 2. Market Cap Filter (Max 15 pts) - $4k to $150k
@@ -75,33 +75,33 @@ export async function GET() {
       .eq("is_active", true)
       .gte("created_at", todayStartISO);
 
-    // 4. Fetch the freshest 100 verified coins
+    // 4. Fetch the freshest 100 verified coins — select both legacy (worker.js) and new (cron) columns
     const { data: recentDexCoins, error: err4 } = await supabase
       .from("tokens_history")
-      .select("mint, name, symbol, market_cap_usd, price_change_24h, created_at, uri, sys_score, ai_score, buys, sells, volume")
+      .select("mint, name, symbol, market_cap_usd, market_cap, price_change_24h, price_change_h24, created_at, uri, image_url, sys_score, ai_score, buys, sells, txns_m5_buys, txns_m5_sells, volume, volume_m5")
       .eq("is_verified", true)
-      .eq("is_active", true) // Must be marked active by worker.js checkpoints
+      .eq("is_active", true)
       .gte("created_at", todayStartISO)
       .order("created_at", { ascending: false })
       .limit(100);
 
     if (err4) console.error("Error fetching recent DEX coins:", err4.message);
 
-    // Map and Calculate scores on the fly
+    // Map and Calculate scores on the fly — handles both ingestion paths
     const evaluatedCoins = (recentDexCoins || []).map((coin) => {
       const scoring = calculateSysScore(coin);
       return {
         mint: coin.mint,
         name: coin.name || "Unknown Token",
         symbol: coin.symbol || "TKN",
-        market_cap: coin.market_cap_usd || 0,
-        price_change_24h: coin.price_change_24h || 0,
+        market_cap: coin.market_cap_usd || coin.market_cap || 0,
+        price_change_24h: coin.price_change_24h || coin.price_change_h24 || 0,
         created_timestamp: coin.created_at ? new Date(coin.created_at).getTime() : Date.now(),
-        image_url: coin.uri || null,
+        image_url: coin.uri || coin.image_url || null,
         buys: scoring.buys,
         sells: scoring.sells,
         ratio: scoring.ratio,
-        sys_score: scoring.sys_score, // Always use fresh calculated score based on strict rules
+        sys_score: scoring.sys_score,
         ai_score: coin.ai_score || null 
       };
     });
@@ -120,7 +120,12 @@ export async function GET() {
         validCoins: validCoinsCount ?? 0
       },
       momentumCoins,
-      lastSynced: new Date().toLocaleTimeString()
+      lastSynced: new Date().toLocaleTimeString(),
+      db_status: {
+        connected: true,
+        totalRows: todayCoinsCount ?? 0,
+        filterWindow: todayStartISO
+      }
     });
   } catch (error) {
     console.error("Critical API Error in /api/scanner/stats:", error);

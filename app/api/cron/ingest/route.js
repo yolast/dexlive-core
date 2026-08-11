@@ -65,38 +65,54 @@ export async function GET(req) {
         if (timeToIndexMs < 0) timeToIndexMs = 0; 
       }
 
-      // STEP 4: Construct the Master Payload using the new DB Schema
+      // STEP 4: Construct the Master Payload — hybrid schema with legacy compat
+      const m5PriceChange = Number(pair.priceChange?.m5 || 0);
+      const h24PriceChange = Number(pair.priceChange?.h24 || 0);
+      const m5Buys = Number(pair.txns?.m5?.buys || 0);
+      const m5Sells = Number(pair.txns?.m5?.sells || 0);
+      const m5Volume = Number(pair.volume?.m5 || 0);
+
       const payload = {
         // Core Identity
         mint: mintAddress,
         name: pair.baseToken?.name || "Unknown",
         symbol: pair.baseToken?.symbol || "MEME",
         
+        // Verification flags — required for stats route counters/list
+        is_verified: true,
+        is_active: true,
+
         // Financials & Liquidity
         market_cap: Number(pair.marketCap || 0),
+        market_cap_usd: Number(pair.fdv || pair.marketCap || 0),
         fdv: Number(pair.fdv || 0),
         liquidity_usd: Number(pair.liquidity?.usd || 0),
         
         // Momentum & Price Changes (%)
-        price_change_m5: Number(pair.priceChange?.m5 || 0),
+        price_change_m5: m5PriceChange,
         price_change_h1: Number(pair.priceChange?.h1 || 0),
-        price_change_h24: Number(pair.priceChange?.h24 || 0),
+        price_change_h24: h24PriceChange,
+        price_change_24h: m5PriceChange || h24PriceChange,
         
         // Trading Volume (USD)
-        volume_m5: Number(pair.volume?.m5 || 0),
+        volume_m5: m5Volume,
         volume_h1: Number(pair.volume?.h1 || 0),
         volume_h24: Number(pair.volume?.h24 || 0),
+        volume: m5Volume,
         
         // Buy/Sell Pressure
-        txns_m5_buys: Number(pair.txns?.m5?.buys || 0),
-        txns_m5_sells: Number(pair.txns?.m5?.sells || 0),
+        txns_m5_buys: m5Buys,
+        txns_m5_sells: m5Sells,
         txns_h1_buys: Number(pair.txns?.h1?.buys || 0),
         txns_h1_sells: Number(pair.txns?.h1?.sells || 0),
         txns_h24_buys: Number(pair.txns?.h24?.buys || 0),
         txns_h24_sells: Number(pair.txns?.h24?.sells || 0),
+        buys: m5Buys,
+        sells: m5Sells,
         
         // Metadata & Links
         image_url: pair.info?.imageUrl || null,
+        uri: pair.info?.imageUrl || null,
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
         
         // --- THE HYBRID TIMELINE ---

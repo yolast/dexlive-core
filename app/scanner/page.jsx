@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { 
-  Zap, ExternalLink, Target, Flame, Brain, Loader2
+  Zap, ExternalLink, Target, Flame, Brain, Loader2, RefreshCw, Database
 } from "lucide-react";
 
 const STRATEGIES = [
@@ -16,6 +16,8 @@ export default function ProScannerHome() {
   const [momentumCoins, setMomentumCoins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastSynced, setLastSynced] = useState("");
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineResult, setPipelineResult] = useState("");
   
   // Track which tokens are currently being analyzed by Gemini
   const [aiScanning, setAiScanning] = useState({});
@@ -87,6 +89,23 @@ export default function ProScannerHome() {
       console.error("AI Scan HTTP request failed:", error);
     } finally {
       setAiScanning(prev => ({ ...prev, [mint]: false }));
+    }
+  };
+
+  const handleRunPipeline = async () => {
+    setPipelineRunning(true);
+    setPipelineResult("");
+    try {
+      const res = await fetch('/api/cron/ingest');
+      const data = await res.json();
+      setPipelineResult(data.success 
+        ? `Pipeline synced ${data.message}` 
+        : `Pipeline error: ${data.error}`);
+      fetchData();
+    } catch (err) {
+      setPipelineResult(`Pipeline request failed: ${err.message}`);
+    } finally {
+      setPipelineRunning(false);
     }
   };
 
@@ -190,8 +209,40 @@ export default function ProScannerHome() {
               <tbody className="divide-y divide-slate-800/60">
                 {momentumCoins.length === 0 ? (
                   <tr>
-                    <td colSpan="7" className="p-8 text-center text-slate-500">
-                      {loading ? "Scanning blockchain feeds..." : "No early momentum snipes detected in current window."}
+                    <td colSpan="7" className="p-8 text-center">
+                      {loading ? (
+                        <span className="text-slate-500">Scanning blockchain feeds...</span>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="flex items-center justify-center gap-2 text-amber-400">
+                            <Database className="w-4 h-4" />
+                            <span className="text-sm font-medium">
+                              {stats.todayCoins === 0 
+                                ? "No tokens in database. Run the pipeline to ingest live data."
+                                : `${stats.todayCoins} tokens ingested, ${stats.dex24hCoins} verified, but none passed the SYS Score ≥50 threshold.`}
+                            </span>
+                          </div>
+                          <div className="flex flex-col items-center gap-3">
+                            <button
+                              onClick={handleRunPipeline}
+                              disabled={pipelineRunning}
+                              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg transition inline-flex items-center gap-2 text-sm disabled:opacity-50"
+                            >
+                              {pipelineRunning ? (
+                                <><RefreshCw className="w-4 h-4 animate-spin" /> Running Pipeline...</>
+                              ) : (
+                                <><RefreshCw className="w-4 h-4" /> Run Data Pipeline</>
+                              )}
+                            </button>
+                            {pipelineResult && (
+                              <p className="text-xs text-slate-400">{pipelineResult}</p>
+                            )}
+                            <p className="text-[10px] text-slate-600 max-w-md">
+                              This fetches live Solana tokens from DexScreener and Pump.fun, enriches them with market data, and populates the database. After running, this page auto-refreshes.
+                            </p>
+                          </div>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ) : (
