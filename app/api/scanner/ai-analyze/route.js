@@ -35,7 +35,11 @@ function extractJson(text) {
 
 // Mirror of the stats route's 70-point systematic score so
 // TOTAL = SYS(70) + AI(30) is computed consistently server-side.
-function calculateSysScore(coin) {
+// Huge gain (>500%) is only penalized when it emerged in the early-candle
+// window (first ~15 min); after that it's a sustained strong trend.
+const EARLY_CANDLE_WINDOW_MS = 15 * 60 * 1000;
+
+function calculateSysScore(coin, ageMs) {
   const mc = coin.market_cap_usd || coin.market_cap || 0;
   const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
   const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
@@ -47,6 +51,10 @@ function calculateSysScore(coin) {
 
   // Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%)
   if (gain >= 20 && gain <= 500) score += 15;
+  else if (gain > 500) {
+    if (!ageMs || ageMs <= EARLY_CANDLE_WINDOW_MS) score += 0;
+    else score += 15;
+  }
   else if (gain >= 10 && gain < 20) score += 10;
   else if (gain > 0 && gain < 10) score += 5;
 
@@ -179,7 +187,10 @@ export async function POST(req) {
     const reasoning = typeof aiData.reasoning === "string" ? aiData.reasoning : "No reasoning provided.";
 
     // Compute the CURRENT systematic score (not stored in DB — it's derived)
-    const sysScoring = calculateSysScore(coin);
+    const aiCoinAgeMs = coin.dex_indexed_timestamp
+      ? Math.max(0, Date.now() - new Date(coin.dex_indexed_timestamp).getTime())
+      : (coin.created_at ? Math.max(0, Date.now() - new Date(coin.created_at).getTime()) : 0);
+    const sysScoring = calculateSysScore(coin, aiCoinAgeMs);
     const sysScore = sysScoring.sys_score;
 
     // 5. Save AI results back to Supabase so we don't have to scan it again

@@ -10,13 +10,19 @@ const supabase = createClient(
 // The 70-Point Systematic Score — DexScreener chart-start based checkpoints
 //
 // Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%)
+//   - Huge gain (>500%): penalized ONLY when it emerged in the early-candle
+//     window (coin younger than ~15 min = first-15s-candle style parabolic
+//     pump). If the coin is older, the huge gain is a sustained strong
+//     trend → full credit.
 // Checkpoint 2 (+15): Volume Acceleration (V_now / V_prev >= 2.0)
 // Checkpoint 3 (+20): Buy/Sell Ratio (>= 2.0) & Unique Buyer Density
 // Checkpoint 4 (+20): Safety Metrics (Creator < 15%, Top10 Wallets < 35%)
 // ─────────────────────────────────────────────────────────────────────────
-function calculateSysScore(coin) {
+const EARLY_CANDLE_WINDOW_MS = 15 * 60 * 1000; // ~15 min
+
+function calculateSysScore(coin, ageMs) {
   const mc = coin.market_cap_usd || coin.market_cap || 0;
-  // DexScreener chart-start based gain (m5 is the closest "15s candle" proxy available)
+  // DexScreener chart-start based gain (h24 clamped to launch for young coins)
   const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
   const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
   const sells = coin.sells || coin.txns_m5_sells || coin.txns_h24_sells || 0;
@@ -27,10 +33,15 @@ function calculateSysScore(coin) {
 
   // ── Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%) ──────
   if (gain >= 20 && gain <= 500) score += 15;
+  else if (gain > 500) {
+    // Huge upside: parabolic risk only if it happened in the early-candle
+    // window (first ~15 min). Otherwise it's a strong trend — full credit.
+    if (!ageMs || ageMs <= EARLY_CANDLE_WINDOW_MS) score += 0;
+    else score += 15;
+  }
   else if (gain >= 10 && gain < 20) score += 10;
   else if (gain > 0 && gain < 10) score += 5;
-  // gain < 0 → 0 points (a red candle never shortlists for early entry)
-  // gain > 500% → 0 points (pump-and-dump parabolic risk, not a clean early entry)
+  // gain < 0 → 0 points (red candle never shortlists for early entry)
 
   // ── Checkpoint 2 (+15): Volume Acceleration ────────────────────────────
   // Production schema has no V_prev; proxy = volume velocity vs market cap.
@@ -123,12 +134,13 @@ export async function GET() {
     const MAX_CHART_AGE_MS = 24 * 60 * 60 * 1000; // 24h early-entry window
 
     const evaluatedCoins = (recentDexCoins || []).map((coin) => {
-      const scoring = calculateSysScore(coin);
       // Age = DexScreener chart start time (dex_indexed_timestamp = pairCreatedAt).
       // Legacy rows without it fall back to insertion time.
       const chartStartMs = coin.dex_indexed_timestamp
         ? new Date(coin.dex_indexed_timestamp).getTime()
         : (coin.created_at ? new Date(coin.created_at).getTime() : Date.now());
+      const ageMs = Date.now() - chartStartMs;
+      const scoring = calculateSysScore(coin, ageMs);
       return {
         mint: coin.mint,
         name: coin.name || "Unknown Token",
@@ -138,7 +150,7 @@ export async function GET() {
         gain: coin.price_change_24h || coin.price_change_h24 || 0,
         created_timestamp: chartStartMs,
         chart_start_ms: chartStartMs,
-        age_ms: Date.now() - chartStartMs,
+        age_ms: ageMs,
         image_url: coin.uri || coin.image_url || null,
         buys: scoring.buys,
         sells: scoring.sells,
@@ -154,6 +166,10 @@ export async function GET() {
       .filter((c) => c.age_ms >= MIN_CHART_AGE_MS)
       .filter((c) => c.age_ms <= MAX_CHART_AGE_MS)
       .filter((c) => c.gain > 0)
+      // Remove ONLY first-15s-candle style pumps: huge upside (>500%) that
+      // emerged within the first ~15 minutes. Huge upside after that window
+      // is a sustained strong trend and stays listed.
+      .filter((c) => !(c.gain > 500 && c.age_ms <= EARLY_CANDLE_WINDOW_MS))
       .filter((c) => c.sys_score >= 30)
       .sort((a, b) => b.sys_score - a.sys_score);
 
