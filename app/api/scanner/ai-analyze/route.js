@@ -9,7 +9,29 @@ const supabase = createClient(
 );
 
 // Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+// Robust JSON extraction — strips markdown fences and finds the first {...} block
+function extractJson(text) {
+  if (!text) return null;
+  const cleaned = text
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch (__) {
+        return null;
+      }
+    }
+    return null;
+  }
+}
 
 export async function POST(req) {
   try {
@@ -17,6 +39,13 @@ export async function POST(req) {
 
     if (!mint) {
       return NextResponse.json({ success: false, error: "Mint address required" }, { status: 400 });
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json(
+        { success: false, error: "GEMINI_API_KEY is not configured on the server" },
+        { status: 500 }
+      );
     }
 
     // 1. Fetch exact token data from Supabase
@@ -27,34 +56,47 @@ export async function POST(req) {
       .single();
 
     if (dbError || !coin) {
-      throw new Error("Token not found in database for analysis.");
+      return NextResponse.json({ success: false, error: "Token not found in database for analysis." }, { status: 404 });
     }
 
-    // 2. Prepare the AI Payload
-    // We pass the raw telemetry data to Gemini to evaluate wash trading and conviction.
+    // 2. Prepare the AI Payload — rich telemetry for the model to judge
+    const mc = coin.market_cap_usd || coin.market_cap || 0;
+    const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
+    const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
+    const sells = coin.sells || coin.txns_m5_sells || coin.txns_h24_sells || 0;
+    const volume = coin.volume || coin.volume_m5 || coin.volume_h24 || 0;
+    const liquidity = coin.liquidity_usd || 0;
+
     const analysisPayload = {
       name: coin.name,
       symbol: coin.symbol,
-      market_cap: coin.market_cap_usd,
-      price_change_1h: coin.price_change_24h, // Stored as 24h in your DB schema but acts as current session
-      age_minutes: Math.floor((Date.now() - new Date(coin.created_at).getTime()) / 60000),
-      buys: coin.buys || "Unknown",
-      sells: coin.sells || "Unknown"
+      market_cap_usd: mc,
+      price_change_pct: gain,
+      volume_usd: volume,
+      liquidity_usd: liquidity,
+      buys,
+      sells,
+      buy_sell_ratio: sells > 0 ? (buys / sells).toFixed(2) : "N/A",
+      age_minutes: coin.created_at
+        ? Math.floor(Math.max(0, Date.now() - new Date(coin.created_at).getTime()) / 60000)
+        : "Unknown",
+      holder_dev_percent: coin.dev_holding_percent ?? "Unknown",
+      bonding_curve_progress: coin.bonding_curve_progress ?? "Unknown"
     };
 
-    // 3. The Institutional HFT Prompt
+    // 3. The Institutional HFT Prompt — 30-point on-click engine
     const prompt = `
       You are an elite high-frequency trading risk assessor for Solana memecoins.
-      Analyze the following live telemetry for a token launched in the last 30 minutes.
-      
+      Analyze the following live telemetry for a token.
+
       TOKEN DATA:
       ${JSON.stringify(analysisPayload)}
 
       SCORING CRITERIA (Max 30 Points Total):
-      1. Wash-Trading/Bot Detection (0-15 points): Penalize if buys/sells look perfectly artificial. Reward organic looking friction.
-      2. Smart Money Conviction (0-15 points): Evaluate narrative/symbol and momentum relative to age. 
+      1. Wash-Trading/Bot Detection (0-15 points): Penalize if buys/sells look perfectly artificial or bot-driven. Reward organic-looking friction (varied wallet sizes, natural buy/sell cadence).
+      2. Smart Money Conviction & Narrative (0-15 points): Evaluate whether this is a viral meta with strong narrative/symbol, and momentum relative to age.
 
-      OUTPUT STRICTLY AS JSON. Do not include markdown formatting like \`\`\`json. 
+      OUTPUT STRICTLY AS JSON. Do not include markdown formatting like \`\`\`json.
       Format exactly like this:
       {
         "ai_score": <integer between 0 and 30>,
@@ -63,37 +105,56 @@ export async function POST(req) {
     `;
 
     // 4. Execute Gemini Model (Forcing JSON response)
-    const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-flash",
-        generationConfig: { responseMimeType: "application/json" }
+    const model = genAI.getGenerativeModel({
+      model: "gemini-flash-latest",
+      generationConfig: { responseMimeType: "application/json" }
     });
-    
+
     const result = await model.generateContent(prompt);
     const responseText = result.response.text();
-    const aiData = JSON.parse(responseText);
 
-    // Ensure safe integer
-    const finalAiScore = parseInt(aiData.ai_score, 10) || 0;
+    if (!responseText) {
+      return NextResponse.json({ success: false, error: "Gemini returned an empty response." }, { status: 502 });
+    }
+
+    const aiData = extractJson(responseText);
+    if (!aiData || aiData.ai_score === undefined) {
+      return NextResponse.json(
+        { success: false, error: "Gemini returned unparseable output.", raw: responseText.slice(0, 300) },
+        { status: 502 }
+      );
+    }
+
+    // Ensure safe integer within 0-30
+    const finalAiScore = Math.min(30, Math.max(0, parseInt(aiData.ai_score, 10) || 0));
+    const reasoning = typeof aiData.reasoning === "string" ? aiData.reasoning : "No reasoning provided.";
 
     // 5. Save AI results back to Supabase so we don't have to scan it again
-    await supabase
+    const { error: updateError } = await supabase
       .from("tokens_history")
       .update({
         ai_score: finalAiScore,
-        ai_reasoning: aiData.reasoning,
+        ai_reasoning: reasoning,
         ai_analyzed_at: new Date().toISOString()
       })
       .eq("mint", mint);
 
-    // 6. Return payload to frontend
+    if (updateError) console.error("Failed to persist AI score:", updateError.message);
+
+    // 6. Return payload to frontend (sys_score + ai_score = total /100)
     return NextResponse.json({
       success: true,
       ai_score: finalAiScore,
-      reasoning: aiData.reasoning
+      sys_score: coin.sys_score || null,
+      total_score: (coin.sys_score || 0) + finalAiScore,
+      reasoning
     });
 
   } catch (error) {
     console.error("AI Analysis Error:", error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    const msg = error?.message?.includes("API key")
+      ? "Gemini API key is invalid or expired. Check GEMINI_API_KEY on the server."
+      : error?.message || "Unknown AI analysis error";
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }

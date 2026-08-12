@@ -49,7 +49,7 @@ export async function POST(req) {
     const gmgnSystemPrompt = `You are an Elite Solana On-Chain Wallet Intelligence Analyst. Evaluate smart-money behavior and conviction for token: ${JSON.stringify(rawData)}. Output score out of 100 and structured breakdown.`;
     
     const gmgnResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-flash-latest',
       contents: gmgnSystemPrompt,
     });
     const gmgnText = gmgnResponse.text();
@@ -57,7 +57,7 @@ export async function POST(req) {
     const dexSystemPrompt = `You are an Elite Solana DEXScreener Technical Analyst. Interpret price trend health and entry timing for token: ${JSON.stringify(rawData)}. Output score out of 100 and phase breakdowns.`;
 
     const dexResponse = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-flash-latest',
       contents: dexSystemPrompt,
     });
     const dexText = dexResponse.text();

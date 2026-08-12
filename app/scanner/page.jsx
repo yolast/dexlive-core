@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { 
@@ -23,6 +23,12 @@ export default function ProScannerHome() {
   const [aiScanning, setAiScanning] = useState({});
   // Store fetched AI scores locally to update the UI instantly
   const [aiResults, setAiResults] = useState({});
+  // Store AI errors per mint so failures are visible
+  const [aiErrors, setAiErrors] = useState({});
+  // Which mint has its reasoning row expanded
+  const [expandedAi, setExpandedAi] = useState(null);
+  // Freshness of the DB (seconds since last worker write)
+  const [lastUpdate, setLastUpdate] = useState(null);
 
   const fetchData = async () => {
     try {
@@ -33,6 +39,9 @@ export default function ProScannerHome() {
         // We trust the backend route.js to send the dynamically scored top 20 coins
         setMomentumCoins(data.momentumCoins || []);
         setLastSynced(data.lastSynced || new Date().toLocaleTimeString());
+        if (data.db_status?.lastUpdate) {
+          setLastUpdate(data.db_status.lastUpdate);
+        }
       }
     } catch (err) {
       console.error("Failed to load scanner stats", err);
@@ -58,14 +67,21 @@ export default function ProScannerHome() {
     return `${hours}h ${minutes % 60}m ago`;
   };
 
-  // Phase 2: On-Demand Gemini AI Trigger (Fully Wired to API)
+  // How stale is the database? (0 = live)
+  const dataAgeSeconds = lastUpdate
+    ? Math.floor((Date.now() - new Date(lastUpdate).getTime()) / 1000)
+    : null;
+  const isLive = dataAgeSeconds !== null && dataAgeSeconds <= 30;
+
+  // Phase 2: On-Demand Gemini AI Trigger (The 30-Point Deep Scan Engine)
   const handleAiScan = async (mint) => {
     if (aiScanning[mint] || aiResults[mint]?.ai_score) return;
 
     setAiScanning(prev => ({ ...prev, [mint]: true }));
+    setAiErrors(prev => ({ ...prev, [mint]: null }));
     
     try {
-      // Connect to our new Gemini API route
+      // Connect to our Gemini API route
       const response = await fetch('/api/scanner/ai-analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -79,13 +95,17 @@ export default function ProScannerHome() {
           ...prev,
           [mint]: { 
             ai_score: data.ai_score, 
-            reasoning: data.reasoning 
+            sys_score: data.sys_score,
+            total_score: data.total_score,
+            reasoning: data.reasoning
           }
         }));
       } else {
+        setAiErrors(prev => ({ ...prev, [mint]: data.error || "AI scan failed" }));
         console.error("AI analysis returned false:", data.error);
       }
     } catch (error) {
+      setAiErrors(prev => ({ ...prev, [mint]: error.message || "AI scan request failed" }));
       console.error("AI Scan HTTP request failed:", error);
     } finally {
       setAiScanning(prev => ({ ...prev, [mint]: false }));
@@ -125,8 +145,13 @@ export default function ProScannerHome() {
             </p>
           </div>
           <div className="flex items-center gap-3 text-xs bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-            <span className="text-slate-300">Auto-syncing</span>
+            <span className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-500 animate-ping" : "bg-amber-500"}`} />
+            <span className={isLive ? "text-emerald-400" : "text-amber-400"}>
+              {isLive ? "LIVE" : "STALE"}
+            </span>
+            <span className="text-slate-500">
+              {dataAgeSeconds === null ? "..." : `DB updated ${dataAgeSeconds}s ago`}
+            </span>
             <span className="text-slate-500">| Last {lastSynced || "Syncing..."}</span>
           </div>
         </div>
@@ -247,83 +272,110 @@ export default function ProScannerHome() {
                   </tr>
                 ) : (
                   momentumCoins.map((coin) => {
-                    const aiData = aiResults[coin.mint] || { ai_score: coin.ai_score, reasoning: "" };
+                    const aiData = aiResults[coin.mint] || { ai_score: coin.ai_score, reasoning: "", total_score: null };
                     const isScanning = aiScanning[coin.mint];
-                    const totalScore = coin.sys_score + (aiData.ai_score || 0);
+                    const aiError = aiErrors[coin.mint];
+                    const hasAi = Boolean(aiData.ai_score);
+                    const totalScore = aiData.total_score ?? (coin.sys_score + (aiData.ai_score || 0));
+                    const showReasoning = expandedAi === coin.mint && hasAi && aiData.reasoning;
 
                     return (
-                      <tr key={coin.mint} className="hover:bg-slate-800/50 transition">
-                        <td className="p-3 font-bold text-white flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center border border-slate-700 overflow-hidden shrink-0">
-                            {coin.image_url ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img src={coin.image_url} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <span className="text-[10px] text-slate-400">{coin.symbol?.[0] || "$"}</span>
-                            )}
-                          </div>
-                          <div>
-                            <div className="text-white truncate max-w-[120px]">{coin.name}</div>
-                            <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                              {coin.symbol} <span className="text-slate-600">|</span> 
-                              <span className="font-mono">{coin.mint.slice(0, 4)}...{coin.mint.slice(-4)}</span>
+                      <React.Fragment key={coin.mint}>
+                        <tr className="hover:bg-slate-800/50 transition">
+                          <td className="p-3 font-bold text-white flex items-center gap-2">
+                            <div className="w-7 h-7 rounded-full bg-slate-800 flex items-center justify-center border border-slate-700 overflow-hidden shrink-0">
+                              {coin.image_url ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={coin.image_url} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                <span className="text-[10px] text-slate-400">{coin.symbol?.[0] || "$"}</span>
+                              )}
                             </div>
-                          </div>
-                        </td>
-                        <td className="p-3 text-slate-300 whitespace-nowrap">{formatCoinAge(coin.created_timestamp)}</td>
-                        <td className="p-3 text-slate-300">${Number(coin.market_cap || 0).toLocaleString()}</td>
-                        
-                        {/* 🔴 Ratio Visual Upgrade */}
-                        <td className="p-3">
-                          <div className="text-emerald-400">{coin.buys} Buys</div>
-                          <div className="text-slate-500 text-[10px]">
-                            {coin.sells} Sells (<span className={coin.ratio >= 1.2 ? "text-emerald-400 font-bold" : "text-slate-400"}>{coin.ratio}x</span>)
-                          </div>
-                        </td>
-                        
-                        <td className="p-3 text-center">
-                          <div className={`text-lg font-bold ${totalScore >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
-                            {totalScore}
-                          </div>
-                          <div className="text-[9px] text-slate-500">
-                            SYS: {coin.sys_score} {aiData.ai_score ? `| AI: ${aiData.ai_score}` : ''}
-                          </div>
-                        </td>
-                        <td className="p-3 text-center">
-                          {aiData.ai_score ? (
-                             <div className="bg-emerald-900/20 border border-emerald-500/20 text-emerald-400 px-2 py-1 rounded text-[10px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[140px]" title={aiData.reasoning}>
-                               AI Verified ✓
-                             </div>
-                          ) : (
-                            <button
-                              onClick={() => handleAiScan(coin.mint)}
-                              disabled={isScanning}
-                              className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 border border-indigo-500/30 rounded flex items-center justify-center gap-1.5 w-full transition disabled:opacity-50"
+                            <div>
+                              <div className="text-white truncate max-w-[120px]">{coin.name}</div>
+                              <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                                {coin.symbol} <span className="text-slate-600">|</span> 
+                                <span className="font-mono">{coin.mint.slice(0, 4)}...{coin.mint.slice(-4)}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="p-3 text-slate-300 whitespace-nowrap">{formatCoinAge(coin.created_timestamp)}</td>
+                          <td className="p-3 text-slate-300">${Number(coin.market_cap || 0).toLocaleString()}</td>
+                          
+                          {/* Buy/Sell Pressure */}
+                          <td className="p-3">
+                            <div className="text-emerald-400">{coin.buys} Buys</div>
+                            <div className="text-slate-500 text-[10px]">
+                              {coin.sells} Sells (<span className={coin.ratio >= 1.2 ? "text-emerald-400 font-bold" : "text-slate-400"}>{coin.ratio}x</span>)
+                            </div>
+                          </td>
+                          
+                          {/* Score — TOTAL = SYS + AI (/100) */}
+                          <td className="p-3 text-center">
+                            <div className={`text-lg font-bold ${totalScore >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                              {hasAi ? `TOTAL: ${totalScore}` : totalScore}
+                            </div>
+                            <div className="text-[9px] text-slate-500">
+                              SYS: {coin.sys_score} {hasAi ? `| AI: ${aiData.ai_score}/30` : ''}
+                            </div>
+                          </td>
+                          <td className="p-3 text-center">
+                            {hasAi ? (
+                              <button
+                                onClick={() => setExpandedAi(expandedAi === coin.mint ? null : coin.mint)}
+                                className="bg-emerald-900/20 border border-emerald-500/20 text-emerald-400 px-2 py-1 rounded text-[10px] whitespace-nowrap w-full transition hover:bg-emerald-900/40"
+                                title={aiData.reasoning}
+                              >
+                                AI Verified ✓ {showReasoning ? "▲" : "▼"}
+                              </button>
+                            ) : (
+                              <div className="flex flex-col items-center gap-1">
+                                <button
+                                  onClick={() => handleAiScan(coin.mint)}
+                                  disabled={isScanning}
+                                  className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 border border-indigo-500/30 rounded flex items-center justify-center gap-1.5 w-full transition disabled:opacity-50"
+                                >
+                                  {isScanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3" />}
+                                  {isScanning ? "Scanning..." : "Run AI"}
+                                </button>
+                                {aiError && (
+                                  <span className="text-[9px] text-red-400 max-w-[150px] text-center leading-tight" title={aiError}>
+                                    {aiError.length > 40 ? aiError.slice(0, 40) + "…" : aiError}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-3 text-right space-x-2 whitespace-nowrap">
+                            <a
+                              href={`https://dexscreener.com/solana/${coin.mint}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition inline-flex items-center gap-1 text-[10px]"
                             >
-                              {isScanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Brain className="w-3 h-3" />}
-                              {isScanning ? "Scanning" : "Run AI"}
-                            </button>
-                          )}
-                        </td>
-                        <td className="p-3 text-right space-x-2 whitespace-nowrap">
-                          <a
-                            href={`https://dexscreener.com/solana/${coin.mint}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition inline-flex items-center gap-1 text-[10px]"
-                          >
-                            Dex <ExternalLink className="w-3 h-3" />
-                          </a>
-                          <a
-                            href={`https://axiom.trade/t/${coin.mint}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition inline-flex items-center gap-1 text-[10px]"
-                          >
-                            Axiom <ExternalLink className="w-3 h-3" />
-                          </a>
-                        </td>
-                      </tr>
+                              Dex <ExternalLink className="w-3 h-3" />
+                            </a>
+                            <a
+                              href={`https://axiom.trade/t/${coin.mint}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition inline-flex items-center gap-1 text-[10px]"
+                            >
+                              Axiom <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </td>
+                        </tr>
+                        {showReasoning && (
+                          <tr className="bg-emerald-950/20 border-t-0">
+                            <td colSpan="7" className="px-6 py-3">
+                              <div className="text-[11px] text-emerald-300 leading-relaxed border-l-2 border-emerald-500/40 pl-3">
+                                <span className="font-bold text-emerald-400">AI Risk Thesis: </span>
+                                {aiData.reasoning}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     );
                   })
                 )}

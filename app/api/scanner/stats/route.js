@@ -14,8 +14,9 @@ function calculateSysScore(coin) {
   const mc = coin.market_cap_usd || coin.market_cap || 0;
   const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
 
-  const buys = coin.buys || coin.txns_m5_buys || 0;
-  const sells = coin.sells || coin.txns_m5_sells || 0;
+  // Prefer live m5 pressure, fall back to h24 so the list never shows all-zeros
+  const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
+  const sells = coin.sells || coin.txns_m5_sells || coin.txns_h24_sells || 0;
   const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
 
   // RUG PENALTY — only reject clear rug-pulls (deep negative + heavy dumps)
@@ -98,6 +99,14 @@ export async function GET() {
 
     if (err4) console.error("Error fetching recent DEX coins:", err4.message);
 
+    // 5. Freshness probe — when was the DB last written by the worker?
+    const { data: latestRow } = await supabase
+      .from("tokens_history")
+      .select(freshnessColumn)
+      .order(freshnessColumn, { ascending: false })
+      .limit(1);
+    const lastUpdate = latestRow?.[0]?.[freshnessColumn] || null;
+
     // Map and Calculate scores on the fly — handles both ingestion paths
     const evaluatedCoins = (recentDexCoins || []).map((coin) => {
       const scoring = calculateSysScore(coin);
@@ -135,7 +144,9 @@ export async function GET() {
       db_status: {
         connected: true,
         totalRows: todayCoinsCount ?? 0,
-        filterWindow: todayStartISO
+        filterWindow: todayStartISO,
+        freshnessColumn,
+        lastUpdate
       }
     });
   } catch (error) {
