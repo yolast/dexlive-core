@@ -45,7 +45,8 @@ export async function GET() {
   try {
     const now = new Date();
     const todayStartISO = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)).toISOString();
-    const freshTodayFilter = `dex_indexed_timestamp.gte.${todayStartISO},created_at.gte.${todayStartISO}`;
+    // Fresh today = chart started today OR brand-new mint (no chart ts yet) ingested today
+    const freshTodayFilter = `and(dex_indexed_timestamp.is.null,created_at.gte.${todayStartISO}),dex_indexed_timestamp.gte.${todayStartISO}`;
 
     const { data: tokens, error } = await supabase
       .from('tokens_history')
@@ -65,6 +66,7 @@ export async function GET() {
     }
 
     const MIN_CHART_AGE_MS = 15 * 1000;
+    const MAX_CHART_AGE_MS = 24 * 60 * 60 * 1000;
 
     const scoredSnipers = tokens
       .map((token) => {
@@ -93,8 +95,10 @@ export async function GET() {
           age_ms: Date.now() - chartStartMs,
         };
       })
-      // A coin cannot be shortlisted before it has 15s of DexScreener chart data
+      // A coin cannot be shortlisted before it has 15s of chart data, and the
+      // early-entry window is capped at 24h.
       .filter((token) => token.age_ms >= MIN_CHART_AGE_MS)
+      .filter((token) => token.age_ms <= MAX_CHART_AGE_MS)
       .filter((token) => token.sys_score >= 30)
       .sort((a, b) => b.sys_score - a.sys_score)
       .slice(0, 20);

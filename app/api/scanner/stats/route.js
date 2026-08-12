@@ -61,10 +61,13 @@ function calculateSysScore(coin) {
   };
 }
 
-// A coin is "fresh today" if its DexScreener chart started today OR it was
-// first ingested today (legacy rows without dex_indexed_timestamp).
+// A coin is "fresh today" only if:
+//  - its DexScreener chart started today, OR
+//  - it has no chart timestamp yet (brand-new mint from Pump.fun, awaiting
+//    verification) and was ingested today.
+// This excludes old coins that merely got first-seen/ingested today.
 function buildFreshTodayFilter(todayStartISO) {
-  return `dex_indexed_timestamp.gte.${todayStartISO},created_at.gte.${todayStartISO}`;
+  return `and(dex_indexed_timestamp.is.null,created_at.gte.${todayStartISO}),dex_indexed_timestamp.gte.${todayStartISO}`;
 }
 
 export async function GET() {
@@ -116,7 +119,8 @@ export async function GET() {
       .limit(1);
     const lastUpdate = latestRow?.[0]?.last_seen_at || null;
 
-    const MIN_CHART_AGE_MS = 15 * 1000; // 15s minimum DexScreener chart data
+    const MIN_CHART_AGE_MS = 15 * 1000;      // 15s minimum DexScreener chart data
+    const MAX_CHART_AGE_MS = 24 * 60 * 60 * 1000; // 24h early-entry window
 
     const evaluatedCoins = (recentDexCoins || []).map((coin) => {
       const scoring = calculateSysScore(coin);
@@ -143,8 +147,10 @@ export async function GET() {
         ai_score: coin.ai_score || null
       };
     })
-      // A coin cannot be shortlisted before it has 15s of DexScreener chart data
+      // A coin cannot be shortlisted before it has 15s of DexScreener chart
+      // data, and the early-entry window is capped at 24h.
       .filter((c) => c.age_ms >= MIN_CHART_AGE_MS)
+      .filter((c) => c.age_ms <= MAX_CHART_AGE_MS)
       .filter((c) => c.sys_score >= 30)
       .sort((a, b) => b.sys_score - a.sys_score)
       .slice(0, 20);
