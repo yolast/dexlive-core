@@ -272,11 +272,13 @@ export default function ProScannerHome() {
                   </tr>
                 ) : (
                   momentumCoins.map((coin) => {
-                    const aiData = aiResults[coin.mint] || { ai_score: coin.ai_score, reasoning: "", total_score: null };
+                    const aiData = aiResults[coin.mint] || { ai_score: coin.ai_score, reasoning: "", total_score: null, sys_score: null };
                     const isScanning = aiScanning[coin.mint];
                     const aiError = aiErrors[coin.mint];
                     const hasAi = Boolean(aiData.ai_score);
-                    const totalScore = aiData.total_score ?? (coin.sys_score + (aiData.ai_score || 0));
+                    // TOTAL = SYS(70) + AI(30). Prefer the freshly-computed sys_score from the API.
+                    const sysForTotal = aiData.sys_score ?? coin.sys_score ?? 0;
+                    const totalScore = sysForTotal + (aiData.ai_score || 0);
                     const showReasoning = expandedAi === coin.mint && hasAi && aiData.reasoning;
 
                     return (

@@ -31,7 +31,10 @@ jobs:
             
             # Reload application with zero downtime & save process list
             pm2 reload dexlive || pm2 restart dexlive || pm2 start npm --name dexlive -- start
-            pm2 restart worker || pm2 start worker.js --name worker
+            
+            # Clean restart of the ingestion worker with crash-loop protection
+            pm2 delete worker || true
+            pm2 start worker.js --name worker --max-restarts 100 --restart-delay 5000
             pm2 save
             
             echo "✅ Deployment to OCI completed successfully!"

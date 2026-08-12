@@ -33,6 +33,48 @@ function extractJson(text) {
   }
 }
 
+// Mirror of the stats route's 70-point systematic score so
+// TOTAL = SYS(70) + AI(30) is computed consistently server-side.
+function calculateSysScore(coin) {
+  let score = 0;
+  const mc = coin.market_cap_usd || coin.market_cap || 0;
+  const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
+
+  const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
+  const sells = coin.sells || coin.txns_m5_sells || coin.txns_h24_sells || 0;
+  const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
+
+  if (gain < -20 || (sells > buys * 3 && buys > 0)) {
+    return { sys_score: 0, buys, sells, ratio: ratio.toFixed(1) };
+  }
+
+  if (mc >= 4000 && mc <= 500000) score += 15;
+  else if (mc > 500000 && mc <= 2000000) score += 10;
+  else if (mc > 1000 && mc < 4000) score += 5;
+
+  if (gain >= 100) score += 20;
+  else if (gain >= 50) score += 15;
+  else if (gain >= 20) score += 10;
+  else if (gain > 0) score += 5;
+
+  if (ratio >= 2.0) score += 15;
+  else if (ratio >= 1.2) score += 10;
+  else if (ratio >= 0.8) score += 5;
+
+  score += 20;
+
+  if (buys > 0 || sells > 0 || (coin.volume || coin.volume_h24 || 0) > 0) {
+    score += 5;
+  }
+
+  return {
+    sys_score: Math.min(score, 70),
+    buys,
+    sells,
+    ratio: ratio.toFixed(1)
+  };
+}
+
 export async function POST(req) {
   try {
     const { mint } = await req.json();
@@ -96,6 +138,10 @@ export async function POST(req) {
       1. Wash-Trading/Bot Detection (0-15 points): Penalize if buys/sells look perfectly artificial or bot-driven. Reward organic-looking friction (varied wallet sizes, natural buy/sell cadence).
       2. Smart Money Conviction & Narrative (0-15 points): Evaluate whether this is a viral meta with strong narrative/symbol, and momentum relative to age.
 
+      CALIBRATION: Use the FULL 0-30 range. A genuinely promising token with real buy pressure
+      and a hot narrative should score 20-30. A suspicious or low-conviction token scores 0-10.
+      Reserve 1-3 only for tokens that are clear wash-trading honeypots.
+
       OUTPUT STRICTLY AS JSON. Do not include markdown formatting like \`\`\`json.
       Format exactly like this:
       {
@@ -129,6 +175,10 @@ export async function POST(req) {
     const finalAiScore = Math.min(30, Math.max(0, parseInt(aiData.ai_score, 10) || 0));
     const reasoning = typeof aiData.reasoning === "string" ? aiData.reasoning : "No reasoning provided.";
 
+    // Compute the CURRENT systematic score (not stored in DB — it's derived)
+    const sysScoring = calculateSysScore(coin);
+    const sysScore = sysScoring.sys_score;
+
     // 5. Save AI results back to Supabase so we don't have to scan it again
     const { error: updateError } = await supabase
       .from("tokens_history")
@@ -141,12 +191,12 @@ export async function POST(req) {
 
     if (updateError) console.error("Failed to persist AI score:", updateError.message);
 
-    // 6. Return payload to frontend (sys_score + ai_score = total /100)
+    // 6. Return payload to frontend: TOTAL = SYS(70) + AI(30) = /100
     return NextResponse.json({
       success: true,
       ai_score: finalAiScore,
-      sys_score: coin.sys_score || null,
-      total_score: (coin.sys_score || 0) + finalAiScore,
+      sys_score: sysScore,
+      total_score: sysScore + finalAiScore,
       reasoning
     });
 

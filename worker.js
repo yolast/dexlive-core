@@ -29,6 +29,12 @@ function connectPumpPortal() {
     ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
   });
 
+  ws.on('error', (err) => {
+    // CRITICAL: without this handler an 'error' event throws an uncaught
+    // exception and kills the whole worker (crash-loop -> PM2 stops it)
+    console.error('❌ PumpPortal WS error:', err.message || err);
+  });
+
   ws.on('message', async (data) => {
     try {
       const parsedData = JSON.parse(data);
@@ -64,27 +70,44 @@ function connectPumpPortal() {
   });
 }
 
+// Keep the process alive even if a callback throws — a WS/API hiccup must
+// never take down the whole ingestion daemon.
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught exception (worker continues):', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Unhandled rejection (worker continues):', reason?.message || reason);
+});
+
 // Poll DexScreener for batch fresh data every 3 minutes
 let hasLastSeenAt = false;
 let existingColumns = null;
 
 async function probeSchema() {
-  // last_seen_at support
-  const { error } = await supabase.from('tokens_history').select('last_seen_at').limit(1);
-  hasLastSeenAt = !error;
-  if (hasLastSeenAt) console.log('✅ last_seen_at column detected');
-  else console.warn('⚠️ last_seen_at column not found — freshness bump disabled');
+  try {
+    // last_seen_at support
+    const { error } = await supabase.from('tokens_history').select('last_seen_at').limit(1);
+    hasLastSeenAt = !error;
+    if (hasLastSeenAt) console.log('✅ last_seen_at column detected');
+    else console.warn('⚠️ last_seen_at column not found — freshness bump disabled');
 
-  // actual column set — writing a missing column fails the whole upsert
-  const { data } = await supabase.from('tokens_history').select('*').limit(1);
-  if (data && data[0]) {
-    existingColumns = new Set(Object.keys(data[0]));
-    console.log(`✅ tokens_history columns detected (${existingColumns.size})`);
-  } else {
+    // actual column set — writing a missing column fails the whole upsert
+    const { data } = await supabase.from('tokens_history').select('*').limit(1);
+    if (data && data[0]) {
+      existingColumns = new Set(Object.keys(data[0]));
+      console.log(`✅ tokens_history columns detected (${existingColumns.size})`);
+    } else {
+      existingColumns = new Set(['mint', 'name', 'symbol', 'is_verified', 'is_active',
+        'market_cap_usd', 'price_change_24h', 'buys', 'sells', 'volume', 'uri',
+        'created_at', 'last_seen_at', 'dex_indexed_timestamp']);
+      console.warn('⚠️ Table empty — using minimal fallback column set');
+    }
+  } catch (err) {
+    console.error('⚠️ Schema probe failed, using minimal fallback:', err.message);
     existingColumns = new Set(['mint', 'name', 'symbol', 'is_verified', 'is_active',
       'market_cap_usd', 'price_change_24h', 'buys', 'sells', 'volume', 'uri',
       'created_at', 'last_seen_at', 'dex_indexed_timestamp']);
-    console.warn('⚠️ Table empty — using minimal fallback column set');
+    hasLastSeenAt = true;
   }
 }
 
@@ -222,6 +245,11 @@ function startPeriodicBatchIngest() {
     batchIngestFromDexScreener(); // run immediately
     setInterval(batchIngestFromDexScreener, 15 * 1000); // every 15 seconds
     console.log('⏰ Periodic batch ingest started (every 15s)');
+  }).catch((err) => {
+    // Never let a startup probe failure take down the process
+    console.error('⚠️ Schema probe rejected, starting batch anyway:', err.message);
+    batchIngestFromDexScreener();
+    setInterval(batchIngestFromDexScreener, 15 * 1000);
   });
 }
 
