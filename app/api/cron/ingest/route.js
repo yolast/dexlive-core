@@ -123,7 +123,10 @@ export async function GET(req) {
         // --- PRE-DEX ANALYTICS ---
         bonding_curve_progress: preDexData?.bonding_curve_progress || 0,
         dev_holding_percent: preDexData?.dev_holding_percent || 0,
-        is_migrated_raydium: preDexData?.is_migrated_raydium || false
+        is_migrated_raydium: preDexData?.is_migrated_raydium || false,
+
+        // Freshness — bumped on every upsert so counters survive midnight UTC reset
+        last_seen_at: new Date().toISOString()
       };
 
       // Push to Supabase
