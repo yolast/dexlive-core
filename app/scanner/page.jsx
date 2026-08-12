@@ -1,14 +1,17 @@
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { 
-  Zap, ExternalLink, Target, Flame, Brain, Loader2, RefreshCw, Database
+  Zap, ExternalLink, Target, Flame, Brain, Loader2, RefreshCw, Database, ChevronLeft, ChevronRight
 } from "lucide-react";
 
 const STRATEGIES = [
   { id: "1-2x-breakout", name: "15S Momentum Snipers", icon: Zap }
 ];
+
+// Internal pagination — 100 coins per page
+const PAGE_SIZE = 100;
 
 export default function ProScannerHome() {
   const router = useRouter();
@@ -29,6 +32,36 @@ export default function ProScannerHome() {
   const [expandedAi, setExpandedAi] = useState(null);
   // Freshness of the DB (seconds since last worker write)
   const [lastUpdate, setLastUpdate] = useState(null);
+  // Sorting: { key: 'age' | 'gain' | null, dir: 'asc' | 'desc' }
+  const [sortConfig, setSortConfig] = useState({ key: null, dir: "desc" });
+  // Internal pagination page (1-based)
+  const [page, setPage] = useState(1);
+
+  const handleSort = (key) => {
+    setSortConfig((prev) => ({
+      key,
+      dir: prev.key === key && prev.dir === "desc" ? "asc" : "desc"
+    }));
+  };
+
+  // Sorted view (default: backend order = best SYS score first)
+  const sortedCoins = useMemo(() => {
+    if (!sortConfig.key) return momentumCoins;
+    const getSortValue = (coin) =>
+      sortConfig.key === "age" ? (coin.age_ms ?? 0) : (coin[sortConfig.key] ?? 0);
+    const arr = [...momentumCoins];
+    arr.sort((a, b) => {
+      const av = getSortValue(a);
+      const bv = getSortValue(b);
+      return sortConfig.dir === "asc" ? av - bv : bv - av;
+    });
+    return arr;
+  }, [momentumCoins, sortConfig]);
+
+  // Paginate
+  const totalPages = Math.max(1, Math.ceil(sortedCoins.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageCoins = sortedCoins.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const fetchData = async () => {
     try {
@@ -223,8 +256,12 @@ export default function ProScannerHome() {
               <thead>
                 <tr className="bg-slate-900/80 text-slate-400 border-b border-slate-800">
                   <th className="p-3">Token</th>
-                  <th className="p-3">Age</th>
-                  <th className="p-3">Gain (From Start)</th>
+                  <th className="p-3 cursor-pointer select-none hover:text-emerald-400 transition" onClick={() => handleSort("age")}>
+                    Age {sortConfig.key === "age" ? (sortConfig.dir === "asc" ? "▲" : "▼") : "⇅"}
+                  </th>
+                  <th className="p-3 cursor-pointer select-none hover:text-emerald-400 transition" onClick={() => handleSort("gain")}>
+                    Gain (From Start) {sortConfig.key === "gain" ? (sortConfig.dir === "asc" ? "▲" : "▼") : "⇅"}
+                  </th>
                   <th className="p-3">Market Cap</th>
                   <th className="p-3">Buy/Sell Ratio</th>
                   <th className="p-3 text-center">Score</th>
@@ -272,7 +309,7 @@ export default function ProScannerHome() {
                     </td>
                   </tr>
                 ) : (
-                  momentumCoins.map((coin) => {
+                  pageCoins.map((coin) => {
                     const aiData = aiResults[coin.mint] || { ai_score: coin.ai_score, reasoning: "", total_score: null, sys_score: null };
                     const isScanning = aiScanning[coin.mint];
                     const aiError = aiErrors[coin.mint];
@@ -396,6 +433,30 @@ export default function ProScannerHome() {
               </tbody>
             </table>
           </div>
+          {/* Internal pagination */}
+          {momentumCoins.length > PAGE_SIZE && (
+            <div className="p-4 border-t border-slate-800 flex items-center justify-between bg-slate-900/40">
+              <span className="text-xs text-slate-400">
+                {momentumCoins.length} coins | Page {safePage} / {totalPages}
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPage(Math.max(1, safePage - 1))}
+                  disabled={safePage <= 1}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition inline-flex items-center gap-1 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <ChevronLeft className="w-3 h-3" /> Prev
+                </button>
+                <button
+                  onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+                  disabled={safePage >= totalPages}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition inline-flex items-center gap-1 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Next <ChevronRight className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
       </div>
