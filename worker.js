@@ -66,11 +66,31 @@ function connectPumpPortal() {
 
 // Poll DexScreener for batch fresh data every 3 minutes
 let hasLastSeenAt = false;
-async function probeLastSeenAt() {
+let existingColumns = null;
+
+async function probeSchema() {
+  // last_seen_at support
   const { error } = await supabase.from('tokens_history').select('last_seen_at').limit(1);
   hasLastSeenAt = !error;
   if (hasLastSeenAt) console.log('✅ last_seen_at column detected');
   else console.warn('⚠️ last_seen_at column not found — freshness bump disabled');
+
+  // actual column set — writing a missing column fails the whole upsert
+  const { data } = await supabase.from('tokens_history').select('*').limit(1);
+  if (data && data[0]) {
+    existingColumns = new Set(Object.keys(data[0]));
+    console.log(`✅ tokens_history columns detected (${existingColumns.size})`);
+  } else {
+    existingColumns = new Set(['mint', 'name', 'symbol', 'is_verified', 'is_active',
+      'market_cap_usd', 'price_change_24h', 'buys', 'sells', 'volume', 'uri',
+      'created_at', 'last_seen_at', 'dex_indexed_timestamp']);
+    console.warn('⚠️ Table empty — using minimal fallback column set');
+  }
+}
+
+function sanitizePayload(payload) {
+  if (!existingColumns) return payload;
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => existingColumns.has(key)));
 }
 
 async function batchIngestFromDexScreener() {
@@ -83,6 +103,7 @@ async function batchIngestFromDexScreener() {
     const pairs = (res.data.pairs || []).filter(p => p.chainId === 'solana');
 
     let synced = 0;
+    let failed = 0;
     const nowISO = new Date().toISOString();
     for (const pair of pairs) {
       const mintAddress = pair.baseToken?.address;
@@ -91,8 +112,18 @@ async function batchIngestFromDexScreener() {
       const m5PriceChange = Number(pair.priceChange?.m5 || 0);
       const h24PriceChange = Number(pair.priceChange?.h24 || 0);
       const m5Buys = Number(pair.txns?.m5?.buys || 0);
+      const h1Buys = Number(pair.txns?.h1?.buys || 0);
+      const h24Buys = Number(pair.txns?.h24?.buys || 0);
       const m5Sells = Number(pair.txns?.m5?.sells || 0);
+      const h1Sells = Number(pair.txns?.h1?.sells || 0);
+      const h24Sells = Number(pair.txns?.h24?.sells || 0);
       const m5Volume = Number(pair.volume?.m5 || 0);
+      const h1Volume = Number(pair.volume?.h1 || 0);
+      const h24Volume = Number(pair.volume?.h24 || 0);
+
+      const buys = m5Buys > 0 ? m5Buys : (h1Buys > 0 ? h1Buys : h24Buys);
+      const sells = m5Sells > 0 ? m5Sells : (h1Sells > 0 ? h1Sells : h24Sells);
+      const volume = m5Volume > 0 ? m5Volume : (h1Volume > 0 ? h1Volume : h24Volume);
 
       let pumpData = null;
       try {
@@ -118,17 +149,17 @@ async function batchIngestFromDexScreener() {
         price_change_h24: h24PriceChange,
         price_change_24h: m5PriceChange || h24PriceChange,
         volume_m5: m5Volume,
-        volume_h1: Number(pair.volume?.h1 || 0),
-        volume_h24: Number(pair.volume?.h24 || 0),
-        volume: m5Volume,
+        volume_h1: h1Volume,
+        volume_h24: h24Volume,
+        volume,
         txns_m5_buys: m5Buys,
         txns_m5_sells: m5Sells,
-        txns_h1_buys: Number(pair.txns?.h1?.buys || 0),
-        txns_h1_sells: Number(pair.txns?.h1?.sells || 0),
-        txns_h24_buys: Number(pair.txns?.h24?.buys || 0),
-        txns_h24_sells: Number(pair.txns?.h24?.sells || 0),
-        buys: m5Buys,
-        sells: m5Sells,
+        txns_h1_buys: h1Buys,
+        txns_h1_sells: h1Sells,
+        txns_h24_buys: h24Buys,
+        txns_h24_sells: h24Sells,
+        buys,
+        sells,
         image_url: pair.info?.imageUrl || null,
         uri: pair.info?.imageUrl || null,
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
@@ -140,27 +171,33 @@ async function batchIngestFromDexScreener() {
       };
       if (hasLastSeenAt) payload.last_seen_at = nowISO;
 
+      const cleanPayload = sanitizePayload(payload);
+
       const { error: upsertError } = await supabase
         .from('tokens_history')
-        .upsert(payload, { onConflict: 'mint' });
+        .upsert(cleanPayload, { onConflict: 'mint' });
       if (!upsertError) synced++;
-      else if (synced < 3) console.error(`[Batch] Upsert error for ${mintAddress}:`, upsertError.message);
+      else {
+        failed++;
+        if (failed <= 3) console.error(`[Batch] Upsert error for ${mintAddress}:`, upsertError.message);
+      }
     }
 
-    // Dead-coin purge
+    // Dead-coin purge (market_cap_usd exists in the production schema)
     const cutoff = Date.now() - 45 * 60 * 1000;
-    await supabase.from('tokens_history').delete()
+    const { error: purgeError } = await supabase.from('tokens_history').delete()
       .lt('dex_indexed_timestamp', cutoff)
-      .lt('market_cap', 3000);
+      .lt('market_cap_usd', 3000);
+    if (purgeError) console.error('[Batch] Purge error:', purgeError.message);
 
-    console.log(`✅ [Batch] Synced ${synced} tokens at`, new Date().toISOString());
+    console.log(`✅ [Batch] Synced ${synced}, failed ${failed} tokens at`, new Date().toISOString());
   } catch (err) {
     console.error('[Batch] Ingest error:', err.message);
   }
 }
 
 function startPeriodicBatchIngest() {
-  probeLastSeenAt().then(() => {
+  probeSchema().then(() => {
     batchIngestFromDexScreener(); // run immediately
     setInterval(batchIngestFromDexScreener, 15 * 1000); // every 15 seconds
     console.log('⏰ Periodic batch ingest started (every 15s)');
@@ -229,9 +266,11 @@ async function checkDexScreener(mint, retries = 5) {
       };
       if (hasLastSeenAt) updateData.last_seen_at = new Date().toISOString();
 
+      const cleanUpdate = sanitizePayload(updateData);
+
       const { error: updateError } = await supabase
         .from('tokens_history')
-        .update(updateData)
+        .update(cleanUpdate)
         .eq('mint', mint);
 
       if (updateError) console.error(`DB Update Error for ${mint}:`, updateError.message);

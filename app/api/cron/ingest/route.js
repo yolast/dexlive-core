@@ -2,7 +2,31 @@ import { supabase } from "@/lib/supabase";
 import { NextResponse } from "next/server";
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 45; // Slightly increased to handle hybrid fetching
+export const maxDuration = 45;
+
+// Cache of columns that actually exist on the table (production schema differs
+// from the full hybrid schema — writing a missing column fails the whole upsert)
+let existingColumns = null;
+
+async function getExistingColumns() {
+  if (existingColumns) return existingColumns;
+  const { data } = await supabase.from('tokens_history').select('*').limit(1);
+  if (data && data[0]) {
+    existingColumns = new Set(Object.keys(data[0]));
+    console.log(`✅ tokens_history columns detected (${existingColumns.size}):`, [...existingColumns].join(', '));
+  } else {
+    // Empty table — fall back to the minimal safe set
+    existingColumns = new Set(['mint', 'name', 'symbol', 'is_verified', 'is_active',
+      'market_cap_usd', 'price_change_24h', 'buys', 'sells', 'volume', 'uri',
+      'created_at', 'last_seen_at', 'dex_indexed_timestamp']);
+  }
+  return existingColumns;
+}
+
+// Only keep payload keys that exist as columns in the table
+function sanitizePayload(payload, columns) {
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => columns.has(key)));
+}
 
 // Helper Function: Fetch Pre-DEX Data gracefully
 async function fetchPreDexData(mint) {
@@ -11,14 +35,13 @@ async function fetchPreDexData(mint) {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       },
-      // Short timeout so a blocked request doesn't hang your pipeline
-      signal: AbortSignal.timeout(2000), 
+      signal: AbortSignal.timeout(2000),
       cache: 'no-store'
     });
 
     if (!res.ok) return null;
     const data = await res.json();
-    
+
     return {
       pump_created_timestamp: data.created_timestamp || null,
       dev_holding_percent: data.creator_holding_percent || 0,
@@ -26,7 +49,6 @@ async function fetchPreDexData(mint) {
       is_migrated_raydium: data.complete || false
     };
   } catch (error) {
-    // If Pump.fun blocks us, fail silently so DEXScreener data still saves
     return null;
   }
 }
@@ -35,18 +57,9 @@ export async function GET(req) {
   try {
     console.log("🔄 Hybrid Pipeline started at:", new Date().toISOString());
     let insertedCount = 0;
+    let failedCount = 0;
 
-    // Probe whether last_seen_at column exists
-    let hasLastSeenAt = true;
-    const { error: probeError } = await supabase
-      .from("tokens_history")
-      .select("last_seen_at")
-      .limit(1);
-    if (probeError) {
-      console.warn("last_seen_at column not found — skipping freshness bump");
-      hasLastSeenAt = false;
-    }
-
+    const columns = await getExistingColumns();
     const nowISO = new Date().toISOString();
 
     // STEP 1: Fetch the core live market data from DEXScreener
@@ -61,111 +74,111 @@ export async function GET(req) {
 
     for (const pair of pairs) {
       if (pair.chainId !== 'solana') continue;
-      
+
       const mintAddress = pair.baseToken?.address;
       if (!mintAddress) continue;
 
       const dexIndexedTimestamp = pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now();
 
-      // STEP 2: The Hybrid Fusion - Fetch Pump.fun pre-data for this specific coin
       const preDexData = await fetchPreDexData(mintAddress);
 
-      // STEP 3: Calculate the AI Velocity Metric (Time to Index)
       let timeToIndexMs = null;
       if (preDexData && preDexData.pump_created_timestamp) {
         timeToIndexMs = dexIndexedTimestamp - preDexData.pump_created_timestamp;
-        // Failsafe: if indexing appears to happen before creation due to API lag, set to 0
-        if (timeToIndexMs < 0) timeToIndexMs = 0; 
+        if (timeToIndexMs < 0) timeToIndexMs = 0;
       }
 
-      // STEP 4: Construct the Master Payload — hybrid schema with legacy compat
+      // Prefer m5 (live) but fall back to h24/h1 so values are never wiped to 0
       const m5PriceChange = Number(pair.priceChange?.m5 || 0);
       const h24PriceChange = Number(pair.priceChange?.h24 || 0);
       const m5Buys = Number(pair.txns?.m5?.buys || 0);
+      const h24Buys = Number(pair.txns?.h24?.buys || 0);
+      const h1Buys = Number(pair.txns?.h1?.buys || 0);
       const m5Sells = Number(pair.txns?.m5?.sells || 0);
+      const h24Sells = Number(pair.txns?.h24?.sells || 0);
+      const h1Sells = Number(pair.txns?.h1?.sells || 0);
       const m5Volume = Number(pair.volume?.m5 || 0);
+      const h24Volume = Number(pair.volume?.h24 || 0);
+      const h1Volume = Number(pair.volume?.h1 || 0);
+
+      const buys = m5Buys > 0 ? m5Buys : (h1Buys > 0 ? h1Buys : h24Buys);
+      const sells = m5Sells > 0 ? m5Sells : (h1Sells > 0 ? h1Sells : h24Sells);
+      const volume = m5Volume > 0 ? m5Volume : (h1Volume > 0 ? h1Volume : h24Volume);
 
       const payload = {
-        // Core Identity
         mint: mintAddress,
         name: pair.baseToken?.name || "Unknown",
         symbol: pair.baseToken?.symbol || "MEME",
-        
-        // Verification flags — required for stats route counters/list
         is_verified: true,
         is_active: true,
 
-        // Financials & Liquidity
-        market_cap: Number(pair.marketCap || 0),
         market_cap_usd: Number(pair.fdv || pair.marketCap || 0),
         fdv: Number(pair.fdv || 0),
         liquidity_usd: Number(pair.liquidity?.usd || 0),
-        
-        // Momentum & Price Changes (%)
+
         price_change_m5: m5PriceChange,
         price_change_h1: Number(pair.priceChange?.h1 || 0),
         price_change_h24: h24PriceChange,
         price_change_24h: m5PriceChange || h24PriceChange,
-        
-        // Trading Volume (USD)
+
         volume_m5: m5Volume,
-        volume_h1: Number(pair.volume?.h1 || 0),
-        volume_h24: Number(pair.volume?.h24 || 0),
-        volume: m5Volume,
-        
-        // Buy/Sell Pressure
+        volume_h1: h1Volume,
+        volume_h24: h24Volume,
+        volume,
+
         txns_m5_buys: m5Buys,
         txns_m5_sells: m5Sells,
-        txns_h1_buys: Number(pair.txns?.h1?.buys || 0),
-        txns_h1_sells: Number(pair.txns?.h1?.sells || 0),
-        txns_h24_buys: Number(pair.txns?.h24?.buys || 0),
-        txns_h24_sells: Number(pair.txns?.h24?.sells || 0),
-        buys: m5Buys,
-        sells: m5Sells,
-        
-        // Metadata & Links
+        txns_h1_buys: h1Buys,
+        txns_h1_sells: h1Sells,
+        txns_h24_buys: h24Buys,
+        txns_h24_sells: h24Sells,
+        buys,
+        sells,
+
         image_url: pair.info?.imageUrl || null,
         uri: pair.info?.imageUrl || null,
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
-        
-        // --- THE HYBRID TIMELINE ---
+
         dex_indexed_timestamp: dexIndexedTimestamp,
         pump_created_timestamp: preDexData?.pump_created_timestamp || null,
         time_to_index_ms: timeToIndexMs,
-        
-        // --- PRE-DEX ANALYTICS ---
+
         bonding_curve_progress: preDexData?.bonding_curve_progress || 0,
         dev_holding_percent: preDexData?.dev_holding_percent || 0,
         is_migrated_raydium: preDexData?.is_migrated_raydium || false,
+
+        last_seen_at: nowISO
       };
 
-      if (hasLastSeenAt) {
-        payload.last_seen_at = nowISO;
-      }
+      const cleanPayload = sanitizePayload(payload, columns);
 
-      // Push to Supabase
       const { error: upsertError } = await supabase
         .from('tokens_history')
-        .upsert(payload, { onConflict: 'mint' });
+        .upsert(cleanPayload, { onConflict: 'mint' });
 
       if (!upsertError) insertedCount++;
+      else {
+        failedCount++;
+        if (failedCount <= 3) console.error(`Upsert error for ${mintAddress}:`, upsertError.message);
+      }
     }
 
-    // STEP 5: Optimized Dead-Coin Purge (Market Cap < $3k AND older than 45 mins)
+    // STEP 5: Dead-Coin Purge (Market Cap < $3k AND older than 45 mins)
     const cutoffTimeMs = Date.now() - (45 * 60 * 1000);
     const { error: deleteError } = await supabase
       .from('tokens_history')
       .delete()
       .lt('dex_indexed_timestamp', cutoffTimeMs)
-      .lt('market_cap', 3000);
+      .lt('market_cap_usd', 3000);
 
     if (deleteError) console.warn("Cleanup warning:", deleteError.message);
 
-    console.log(`✅ Hybrid Pipeline Complete: Synced ${insertedCount} tokens.`);
+    console.log(`✅ Hybrid Pipeline Complete: Synced ${insertedCount}, failed ${failedCount} tokens.`);
 
     return NextResponse.json({
       success: true,
       message: `Successfully ingested/synced ${insertedCount} tokens.`,
+      failed: failedCount,
       timestamp: new Date().toISOString()
     });
 
