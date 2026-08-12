@@ -1,8 +1,12 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
-// The 70-point systematic score (same checkpoints as the scanner feed)
-function calculateSysScore(token) {
+// The 70-point systematic score (same checkpoints as the scanner feed).
+// Huge gain (>500%) is only penalized when it emerged in the early-candle
+// window (first ~15 min); after that it's a sustained strong trend.
+const EARLY_CANDLE_WINDOW_MS = 15 * 60 * 1000;
+
+function calculateSysScore(token, ageMs) {
   const mc = token.market_cap_usd || token.market_cap || 0;
   const gain = token.price_change_24h || token.price_change_h24 || token.price_change_m5 || 0;
   const buys = token.buys || token.txns_m5_buys || token.txns_h24_buys || 0;
@@ -14,6 +18,10 @@ function calculateSysScore(token) {
 
   // Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%)
   if (gain >= 20 && gain <= 500) score += 15;
+  else if (gain > 500) {
+    if (!ageMs || ageMs <= EARLY_CANDLE_WINDOW_MS) score += 0;
+    else score += 15;
+  }
   else if (gain >= 10 && gain < 20) score += 10;
   else if (gain > 0 && gain < 10) score += 5;
 
@@ -70,11 +78,12 @@ export async function GET() {
 
     const scoredSnipers = tokens
       .map((token) => {
-        const scoring = calculateSysScore(token);
         // Age = DexScreener chart start time; legacy rows fall back to insertion time
         const chartStartMs = token.dex_indexed_timestamp
           ? new Date(token.dex_indexed_timestamp).getTime()
           : (token.created_at ? new Date(token.created_at).getTime() : Date.now());
+        const ageMs = Date.now() - chartStartMs;
+        const scoring = calculateSysScore(token, ageMs);
 
         return {
           mint: token.mint,
@@ -93,7 +102,7 @@ export async function GET() {
           image_url: token.uri || token.image_url || null,
           created_timestamp: chartStartMs,
           chart_start_ms: chartStartMs,
-          age_ms: Date.now() - chartStartMs,
+          age_ms: ageMs,
         };
       })
       // A coin cannot be shortlisted before it has 15s of chart data, the
@@ -102,6 +111,9 @@ export async function GET() {
       .filter((token) => token.age_ms >= MIN_CHART_AGE_MS)
       .filter((token) => token.age_ms <= MAX_CHART_AGE_MS)
       .filter((token) => token.gain > 0)
+      // Remove ONLY first-15s-candle style pumps: huge upside (>500%) within
+      // the first ~15 min. Huge upside after that is a strong trend — stays.
+      .filter((token) => !(token.gain > 500 && token.age_ms <= EARLY_CANDLE_WINDOW_MS))
       .filter((token) => token.sys_score >= 30)
       .sort((a, b) => b.sys_score - a.sys_score);
 
