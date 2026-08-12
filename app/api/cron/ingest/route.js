@@ -36,6 +36,19 @@ export async function GET(req) {
     console.log("🔄 Hybrid Pipeline started at:", new Date().toISOString());
     let insertedCount = 0;
 
+    // Probe whether last_seen_at column exists
+    let hasLastSeenAt = true;
+    const { error: probeError } = await supabase
+      .from("tokens_history")
+      .select("last_seen_at")
+      .limit(1);
+    if (probeError) {
+      console.warn("last_seen_at column not found — skipping freshness bump");
+      hasLastSeenAt = false;
+    }
+
+    const nowISO = new Date().toISOString();
+
     // STEP 1: Fetch the core live market data from DEXScreener
     const searchRes = await fetch("https://api.dexscreener.com/latest/dex/search?q=pump", {
       headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -124,10 +137,11 @@ export async function GET(req) {
         bonding_curve_progress: preDexData?.bonding_curve_progress || 0,
         dev_holding_percent: preDexData?.dev_holding_percent || 0,
         is_migrated_raydium: preDexData?.is_migrated_raydium || false,
-
-        // Freshness — bumped on every upsert so counters survive midnight UTC reset
-        last_seen_at: new Date().toISOString()
       };
+
+      if (hasLastSeenAt) {
+        payload.last_seen_at = nowISO;
+      }
 
       // Push to Supabase
       const { error: upsertError } = await supabase
