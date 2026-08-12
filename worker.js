@@ -93,14 +93,34 @@ function sanitizePayload(payload) {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => existingColumns.has(key)));
 }
 
+// Fetch fresh Solana pairs from several DexScreener queries, deduped by mint
+async function fetchFreshPairs() {
+  const terms = ['pump', 'raydium'];
+  const byMint = new Map();
+  for (const term of terms) {
+    try {
+      const res = await axios.get(`https://api.dexscreener.com/latest/dex/search?q=${term}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        timeout: 20000
+      });
+      for (const p of (res.data.pairs || [])) {
+        if (p.chainId !== 'solana' || !p.baseToken?.address) continue;
+        const addr = p.baseToken.address;
+        const existing = byMint.get(addr);
+        const hasTxns = (p.txns?.m5?.buys || 0) > 0 || (p.txns?.h24?.buys || 0) > 0;
+        const existingHasTxns = existing && ((existing.txns?.m5?.buys || 0) > 0 || (existing.txns?.h24?.buys || 0) > 0);
+        if (!existing || (hasTxns && !existingHasTxns)) byMint.set(addr, p);
+      }
+    } catch (_) { /* skip failed query */ }
+  }
+  return [...byMint.values()];
+}
+
 async function batchIngestFromDexScreener() {
   try {
     console.log('🔄 [Batch] Starting DexScreener search at', new Date().toISOString());
-    const res = await axios.get('https://api.dexscreener.com/latest/dex/search?q=pump', {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 30000
-    });
-    const pairs = (res.data.pairs || []).filter(p => p.chainId === 'solana');
+    const pairs = await fetchFreshPairs();
+    console.log(`[Batch] Search returned ${pairs.length} unique Solana pairs`);
 
     let synced = 0;
     let failed = 0;

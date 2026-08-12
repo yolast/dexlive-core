@@ -53,6 +53,32 @@ async function fetchPreDexData(mint) {
   }
 }
 
+// Fetch fresh Solana pairs from several DexScreener queries, deduped by mint.
+// (q=pump alone returns mostly tokens literally named "PUMP" — too narrow.)
+async function fetchFreshPairs() {
+  const terms = ['pump', 'raydium'];
+  const byMint = new Map();
+  for (const term of terms) {
+    try {
+      const res = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${term}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        cache: 'no-store'
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const p of (data.pairs || [])) {
+        if (p.chainId !== 'solana' || !p.baseToken?.address) continue;
+        const addr = p.baseToken.address;
+        const existing = byMint.get(addr);
+        const hasTxns = (p.txns?.m5?.buys || 0) > 0 || (p.txns?.h24?.buys || 0) > 0;
+        const existingHasTxns = existing && ((existing.txns?.m5?.buys || 0) > 0 || (existing.txns?.h24?.buys || 0) > 0);
+        if (!existing || (hasTxns && !existingHasTxns)) byMint.set(addr, p);
+      }
+    } catch (_) { /* skip failed query */ }
+  }
+  return [...byMint.values()];
+}
+
 export async function GET(req) {
   try {
     console.log("🔄 Hybrid Pipeline started at:", new Date().toISOString());
@@ -63,14 +89,8 @@ export async function GET(req) {
     const nowISO = new Date().toISOString();
 
     // STEP 1: Fetch the core live market data from DEXScreener
-    const searchRes = await fetch("https://api.dexscreener.com/latest/dex/search?q=pump", {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      cache: 'no-store'
-    });
-
-    if (!searchRes.ok) throw new Error(`DexScreener API status ${searchRes.status}`);
-    const searchData = await searchRes.json();
-    const pairs = searchData.pairs || [];
+    const pairs = await fetchFreshPairs();
+    console.log(`Search returned ${pairs.length} unique Solana pairs`);
 
     for (const pair of pairs) {
       if (pair.chainId !== 'solana') continue;

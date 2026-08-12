@@ -304,10 +304,16 @@ export default function ProScannerHome() {
                           
                           {/* Buy/Sell Pressure */}
                           <td className="p-3">
-                            <div className="text-emerald-400">{coin.buys} Buys</div>
-                            <div className="text-slate-500 text-[10px]">
-                              {coin.sells} Sells (<span className={coin.ratio >= 1.2 ? "text-emerald-400 font-bold" : "text-slate-400"}>{coin.ratio}x</span>)
-                            </div>
+                            {(coin.buys || coin.sells) ? (
+                              <>
+                                <div className="text-emerald-400">{coin.buys} Buys</div>
+                                <div className="text-slate-500 text-[10px]">
+                                  {coin.sells} Sells (<span className={coin.ratio >= 1.2 ? "text-emerald-400 font-bold" : "text-slate-400"}>{coin.ratio}x</span>)
+                                </div>
+                              </>
+                            ) : (
+                              <div className="text-slate-600 text-[10px]">No txns data</div>
+                            )}
                           </td>
                           
                           {/* Score — TOTAL = SYS + AI (/100) */}

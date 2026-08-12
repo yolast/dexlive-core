@@ -43,6 +43,11 @@ function calculateSysScore(coin) {
   // 5. Base Safety Metrics (Max 20 pts)
   score += 20;
 
+  // 6. Live activity bonus (Max 5 pts) — ranks tokens with real txns/volume above stale ones
+  if (buys > 0 || sells > 0 || (coin.volume || coin.volume_h24 || 0) > 0) {
+    score += 5;
+  }
+
   return {
     sys_score: Math.min(score, 70),
     buys,
