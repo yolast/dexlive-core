@@ -56,6 +56,108 @@ function connectPumpPortal() {
   });
 }
 
+// Poll DexScreener for batch fresh data every 3 minutes
+let hasLastSeenAt = false;
+async function probeLastSeenAt() {
+  const { error } = await supabase.from('tokens_history').select('last_seen_at').limit(1);
+  hasLastSeenAt = !error;
+  if (hasLastSeenAt) console.log('✅ last_seen_at column detected');
+  else console.warn('⚠️ last_seen_at column not found — freshness bump disabled');
+}
+
+async function batchIngestFromDexScreener() {
+  try {
+    console.log('🔄 [Batch] Starting DexScreener search at', new Date().toISOString());
+    const res = await axios.get('https://api.dexscreener.com/latest/dex/search?q=pump', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 30000
+    });
+    const pairs = (res.data.pairs || []).filter(p => p.chainId === 'solana');
+
+    let synced = 0;
+    const nowISO = new Date().toISOString();
+    for (const pair of pairs) {
+      const mintAddress = pair.baseToken?.address;
+      if (!mintAddress) continue;
+
+      const m5PriceChange = Number(pair.priceChange?.m5 || 0);
+      const h24PriceChange = Number(pair.priceChange?.h24 || 0);
+      const m5Buys = Number(pair.txns?.m5?.buys || 0);
+      const m5Sells = Number(pair.txns?.m5?.sells || 0);
+      const m5Volume = Number(pair.volume?.m5 || 0);
+
+      let pumpData = null;
+      try {
+        const pumpRes = await axios.get(`https://frontend-api.pump.fun/coins/${mintAddress}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+          timeout: 2000
+        });
+        if (pumpRes.status === 200) pumpData = pumpRes.data;
+      } catch (_) { /* Pump.fun may block — skip enrichment */ }
+
+      const payload = {
+        mint: mintAddress,
+        name: pair.baseToken?.name || 'Unknown',
+        symbol: pair.baseToken?.symbol || 'MEME',
+        is_verified: true,
+        is_active: true,
+        market_cap: Number(pair.marketCap || 0),
+        market_cap_usd: Number(pair.fdv || pair.marketCap || 0),
+        fdv: Number(pair.fdv || 0),
+        liquidity_usd: Number(pair.liquidity?.usd || 0),
+        price_change_m5: m5PriceChange,
+        price_change_h1: Number(pair.priceChange?.h1 || 0),
+        price_change_h24: h24PriceChange,
+        price_change_24h: m5PriceChange || h24PriceChange,
+        volume_m5: m5Volume,
+        volume_h1: Number(pair.volume?.h1 || 0),
+        volume_h24: Number(pair.volume?.h24 || 0),
+        volume: m5Volume,
+        txns_m5_buys: m5Buys,
+        txns_m5_sells: m5Sells,
+        txns_h1_buys: Number(pair.txns?.h1?.buys || 0),
+        txns_h1_sells: Number(pair.txns?.h1?.sells || 0),
+        txns_h24_buys: Number(pair.txns?.h24?.buys || 0),
+        txns_h24_sells: Number(pair.txns?.h24?.sells || 0),
+        buys: m5Buys,
+        sells: m5Sells,
+        image_url: pair.info?.imageUrl || null,
+        uri: pair.info?.imageUrl || null,
+        dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
+        dex_indexed_timestamp: pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now(),
+        pump_created_timestamp: pumpData?.created_timestamp || null,
+        bonding_curve_progress: pumpData?.bonding_curve_progress || (pumpData?.usd_market_cap > 55000 ? 100 : 0),
+        dev_holding_percent: pumpData?.creator_holding_percent || 0,
+        is_migrated_raydium: pumpData?.complete || false,
+      };
+      if (hasLastSeenAt) payload.last_seen_at = nowISO;
+
+      const { error: upsertError } = await supabase
+        .from('tokens_history')
+        .upsert(payload, { onConflict: 'mint' });
+      if (!upsertError) synced++;
+    }
+
+    // Dead-coin purge
+    const cutoff = Date.now() - 45 * 60 * 1000;
+    await supabase.from('tokens_history').delete()
+      .lt('dex_indexed_timestamp', cutoff)
+      .lt('market_cap', 3000);
+
+    console.log(`✅ [Batch] Synced ${synced} tokens at`, new Date().toISOString());
+  } catch (err) {
+    console.error('[Batch] Ingest error:', err.message);
+  }
+}
+
+function startPeriodicBatchIngest() {
+  probeLastSeenAt().then(() => {
+    batchIngestFromDexScreener(); // run immediately
+    setInterval(batchIngestFromDexScreener, 3 * 60 * 1000); // every 3 minutes
+    console.log('⏰ Periodic batch ingest started (every 3 min)');
+  });
+}
+
 // Poll DexScreener to verify and map data
 async function checkDexScreener(mint, retries = 5) {
   try {
@@ -91,18 +193,32 @@ async function checkDexScreener(mint, retries = 5) {
       console.log(`✅ [Verified] Momentum Coin Found! ${mint} | +${priceChange}% | MC: $${marketCap}`);
 
       // 🟢 MAPPING REAL DATA: Send the exact m5 buys/sells to DB
+      const m5Buys = buys;
+      const m5Sells = sells;
+      const m5Vol = volume;
+      const h24Change = pair.priceChange?.h24 || 0;
       const updateData = {
         is_verified: true,
         is_active: true,
         name: pair.baseToken.name,
         symbol: pair.baseToken.symbol,
         market_cap_usd: marketCap,
-        price_change_24h: priceChange, // Storing m5/recent gain here so route.js scores it perfectly
+        market_cap: marketCap,
+        price_change_24h: priceChange,
+        price_change_m5: priceChange,
+        price_change_h24: h24Change,
         uri: pair.info?.imageUrl || null,
-        buys: buys,
-        sells: sells,
-        volume: volume
+        image_url: pair.info?.imageUrl || null,
+        buys: m5Buys,
+        sells: m5Sells,
+        volume: m5Vol,
+        txns_m5_buys: m5Buys,
+        txns_m5_sells: m5Sells,
+        volume_m5: m5Vol,
+        liquidity_usd: Number(pair.liquidity?.usd || 0),
+        dex_indexed_timestamp: pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now(),
       };
+      if (hasLastSeenAt) updateData.last_seen_at = new Date().toISOString();
 
       const { error: updateError } = await supabase
         .from('tokens_history')
@@ -128,3 +244,4 @@ async function checkDexScreener(mint, retries = 5) {
 
 // Initialize
 connectPumpPortal();
+startPeriodicBatchIngest();
