@@ -43,8 +43,8 @@ export default function ProScannerHome() {
 
   useEffect(() => {
     fetchData();
-    // 🔴 CRITICAL FIX: Changed from 60000ms to 10000ms (10s) for the 15S strategy!
-    const interval = setInterval(fetchData, 10000); 
+    // Live analysis: poll every 3 seconds
+    const interval = setInterval(fetchData, 3000); 
     return () => clearInterval(interval);
   }, []);
 

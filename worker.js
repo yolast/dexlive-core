@@ -42,8 +42,8 @@ function connectPumpPortal() {
           return;
         }
 
-        // 2. Start checking DEXScreener with a delay for initial liquidity to pool
-        setTimeout(() => checkDexScreener(parsedData.mint), 15000); // 15-second delay
+        // 2. Start checking DEXScreener with a short delay for initial liquidity to pool
+        setTimeout(() => checkDexScreener(parsedData.mint), 5000); // 5-second delay
       }
     } catch (err) {
       console.error('Error parsing WebSocket message:', err);
@@ -153,8 +153,8 @@ async function batchIngestFromDexScreener() {
 function startPeriodicBatchIngest() {
   probeLastSeenAt().then(() => {
     batchIngestFromDexScreener(); // run immediately
-    setInterval(batchIngestFromDexScreener, 3 * 60 * 1000); // every 3 minutes
-    console.log('⏰ Periodic batch ingest started (every 3 min)');
+    setInterval(batchIngestFromDexScreener, 15 * 1000); // every 15 seconds
+    console.log('⏰ Periodic batch ingest started (every 15s)');
   });
 }
 
@@ -231,8 +231,8 @@ async function checkDexScreener(mint, retries = 5) {
     
     // Retry logic if token isn't indexed by DexScreener yet
     if (retries > 0) {
-      console.log(`[Retry] ${mint} not found yet. Retrying in 10s... (${retries} left)`);
-      setTimeout(() => checkDexScreener(mint, retries - 1), 10000);
+      console.log(`[Retry] ${mint} not found yet. Retrying in 3s... (${retries} left)`);
+      setTimeout(() => checkDexScreener(mint, retries - 1), 3000);
     } else {
       console.log(`[Dead] ${mint} failed to index after retries.`);
     }
