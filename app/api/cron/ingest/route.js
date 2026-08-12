@@ -99,14 +99,21 @@ export async function GET(req) {
       const sells = m5Sells > 0 ? m5Sells : (h1Sells > 0 ? h1Sells : h24Sells);
       const volume = m5Volume > 0 ? m5Volume : (h1Volume > 0 ? h1Volume : h24Volume);
 
+      const mc = Number(pair.fdv || pair.marketCap || 0);
+      // Funnel semantics:
+      //  is_verified = true  → the coin IS listed on DexScreener (we found it there)
+      //  is_active   = true  → it passes the basic early-entry checkpoints
+      //                       (market cap range + real buy activity)
+      const passesCheckpoints = mc >= 3000 && mc <= 2000000 && buys > 0;
+
       const payload = {
         mint: mintAddress,
         name: pair.baseToken?.name || "Unknown",
         symbol: pair.baseToken?.symbol || "MEME",
         is_verified: true,
-        is_active: true,
+        is_active: passesCheckpoints,
 
-        market_cap_usd: Number(pair.fdv || pair.marketCap || 0),
+        market_cap_usd: mc,
         fdv: Number(pair.fdv || 0),
         liquidity_usd: Number(pair.liquidity?.usd || 0),
 

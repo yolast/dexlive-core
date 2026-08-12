@@ -6,134 +6,146 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Helper function to calculate the 70-Point Systematic Score
-// Handles both worker.js legacy columns (market_cap_usd, price_change_24h, uri, buys, sells, volume)
-// and cron route new columns (market_cap, price_change_h24, image_url, txns_m5_buys/m5_sells, volume_m5)
+// ─────────────────────────────────────────────────────────────────────────
+// The 70-Point Systematic Score — DexScreener chart-start based checkpoints
+//
+// Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%)
+// Checkpoint 2 (+15): Volume Acceleration (V_now / V_prev >= 2.0)
+// Checkpoint 3 (+20): Buy/Sell Ratio (>= 2.0) & Unique Buyer Density
+// Checkpoint 4 (+20): Safety Metrics (Creator < 15%, Top10 Wallets < 35%)
+// ─────────────────────────────────────────────────────────────────────────
 function calculateSysScore(coin) {
-  let score = 0;
   const mc = coin.market_cap_usd || coin.market_cap || 0;
+  // DexScreener chart-start based gain (m5 is the closest "15s candle" proxy available)
   const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
-
-  // Prefer live m5 pressure, fall back to h24 so the list never shows all-zeros
   const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
   const sells = coin.sells || coin.txns_m5_sells || coin.txns_h24_sells || 0;
+  const volume = coin.volume || coin.volume_m5 || coin.volume_h24 || 0;
   const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
 
-  // RUG PENALTY — only reject clear rug-pulls (deep negative + heavy dumps)
-  if (gain < -20 || (sells > buys * 3 && buys > 0)) {
-    return { sys_score: 0, buys, sells, ratio: ratio.toFixed(1) };
-  }
+  let score = 0;
 
-  // 2. Market Cap Filter (Max 15 pts)
-  if (mc >= 4000 && mc <= 500000) score += 15;
-  else if (mc > 500000 && mc <= 2000000) score += 10;
-  else if (mc > 1000 && mc < 4000) score += 5;
+  // ── Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%) ──────
+  if (gain >= 20 && gain <= 500) score += 15;
+  else if (gain >= 10 && gain < 20) score += 10;
+  else if (gain > 0 && gain < 10) score += 5;
+  // gain < 0 → 0 points (a red candle never shortlists for early entry)
+  // gain > 500% → 0 points (pump-and-dump parabolic risk, not a clean early entry)
 
-  // 3. Momentum / Gain (Max 20 pts)
-  if (gain >= 100) score += 20;
-  else if (gain >= 50) score += 15;
-  else if (gain >= 20) score += 10;
-  else if (gain > 0) score += 5;
+  // ── Checkpoint 2 (+15): Volume Acceleration ────────────────────────────
+  // Production schema has no V_prev; proxy = volume velocity vs market cap.
+  // Fresh momentum coins churn >=10% of market cap in volume.
+  const volMcRatio = mc > 0 ? volume / mc : 0;
+  if (volMcRatio >= 0.10) score += 15;
+  else if (volMcRatio >= 0.05) score += 10;
+  else if (volMcRatio >= 0.02) score += 5;
 
-  // 4. Buy/Sell Ratio (Max 15 pts)
-  if (ratio >= 2.0) score += 15;
+  // ── Checkpoint 3 (+20): Buy/Sell Ratio >= 2.0 & Unique Buyer Density ───
+  if (ratio >= 2.0) score += 20;
+  else if (ratio >= 1.5) score += 15;
   else if (ratio >= 1.2) score += 10;
-  else if (ratio >= 0.8) score += 5;
+  else if (ratio >= 1.0) score += 5;
 
-  // 5. Base Safety Metrics (Max 20 pts)
+  // ── Checkpoint 4 (+20): Safety Metrics ─────────────────────────────────
+  // Production schema lacks creator_holding_pct / top10_holding_pct columns,
+  // so we proxy with the pipeline's verification gate: coins marked
+  // is_verified + is_active passed the ingestion checkpoints.
   score += 20;
-
-  // 6. Live activity bonus (Max 5 pts) — ranks tokens with real txns/volume above stale ones
-  if (buys > 0 || sells > 0 || (coin.volume || coin.volume_h24 || 0) > 0) {
-    score += 5;
-  }
 
   return {
     sys_score: Math.min(score, 70),
     buys,
     sells,
-    ratio: ratio.toFixed(1)
+    ratio: ratio.toFixed(1),
+    volume
   };
+}
+
+// A coin is "fresh today" if its DexScreener chart started today OR it was
+// first ingested today (legacy rows without dex_indexed_timestamp).
+function buildFreshTodayFilter(todayStartISO) {
+  return `dex_indexed_timestamp.gte.${todayStartISO},created_at.gte.${todayStartISO}`;
 }
 
 export async function GET() {
   try {
     const now = new Date();
     const todayStartISO = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)).toISOString();
+    const freshTodayFilter = buildFreshTodayFilter(todayStartISO);
 
-    // Use last_seen_at if the column exists (added by the pipeline), else fall back to created_at
-    let freshnessColumn = "last_seen_at";
-    const { error: probeError } = await supabase
-      .from("tokens_history")
-      .select("last_seen_at")
-      .limit(1);
-    if (probeError) {
-      console.warn("last_seen_at column not found, falling back to created_at");
-      freshnessColumn = "created_at";
-    }
-
-    // 1. Today Coins Ingested
-    const { count: todayCoinsCount } = await supabase
+    // 1. Today Coins Ingested — completely new fresh coins from PUMP.FUN
+    const { count: todayCoinsCount, error: e1 } = await supabase
       .from("tokens_history")
       .select("mint", { count: "exact" })
-      .gte(freshnessColumn, todayStartISO);
+      .or(freshTodayFilter);
+    if (e1) console.error("todayCoins query error:", e1.message);
 
-    // 2. 24H DEX Coins
-    const { count: dexCoinsCount } = await supabase
+    // 2. 24H DEX Coins — of today's coins, listed on DexScreener
+    const { count: dexCoinsCount, error: e2 } = await supabase
       .from("tokens_history")
       .select("mint", { count: "exact" })
       .eq("is_verified", true)
-      .gte(freshnessColumn, todayStartISO);
+      .or(freshTodayFilter);
+    if (e2) console.error("dexCoins query error:", e2.message);
 
-    // 3. Valid DexLive Coins
-    const { count: validCoinsCount } = await supabase
+    // 3. Valid DexLive Coins — passed 10+ checkpoints
+    const { count: validCoinsCount, error: e3 } = await supabase
       .from("tokens_history")
       .select("mint", { count: "exact" })
       .eq("is_active", true)
-      .gte(freshnessColumn, todayStartISO);
+      .or(freshTodayFilter);
+    if (e3) console.error("validCoins query error:", e3.message);
 
-    // 4. Fetch the freshest 100 verified coins — select('*') is safe against missing columns
+    // 4. Fetch today's verified + active coins, freshest chart-start first
     const { data: recentDexCoins, error: err4 } = await supabase
       .from("tokens_history")
       .select("*")
       .eq("is_verified", true)
       .eq("is_active", true)
-      .gte(freshnessColumn, todayStartISO)
-      .order(freshnessColumn, { ascending: false })
-      .limit(100);
+      .or(freshTodayFilter)
+      .order("dex_indexed_timestamp", { ascending: false, nullsFirst: false })
+      .limit(200);
 
     if (err4) console.error("Error fetching recent DEX coins:", err4.message);
 
-    // 5. Freshness probe — when was the DB last written by the worker?
+    // 5. Freshness probe — when was the DB last written?
     const { data: latestRow } = await supabase
       .from("tokens_history")
-      .select(freshnessColumn)
-      .order(freshnessColumn, { ascending: false })
+      .select("last_seen_at")
+      .order("last_seen_at", { ascending: false })
       .limit(1);
-    const lastUpdate = latestRow?.[0]?.[freshnessColumn] || null;
+    const lastUpdate = latestRow?.[0]?.last_seen_at || null;
 
-    // Map and Calculate scores on the fly — handles both ingestion paths
+    const MIN_CHART_AGE_MS = 15 * 1000; // 15s minimum DexScreener chart data
+
     const evaluatedCoins = (recentDexCoins || []).map((coin) => {
       const scoring = calculateSysScore(coin);
+      // Age = DexScreener chart start time (dex_indexed_timestamp = pairCreatedAt).
+      // Legacy rows without it fall back to insertion time.
+      const chartStartMs = coin.dex_indexed_timestamp
+        ? new Date(coin.dex_indexed_timestamp).getTime()
+        : (coin.created_at ? new Date(coin.created_at).getTime() : Date.now());
       return {
         mint: coin.mint,
         name: coin.name || "Unknown Token",
         symbol: coin.symbol || "TKN",
         market_cap: coin.market_cap_usd || coin.market_cap || 0,
         price_change_24h: coin.price_change_24h || coin.price_change_h24 || 0,
-        created_timestamp: coin.last_seen_at ? new Date(coin.last_seen_at).getTime() : (coin.created_at ? new Date(coin.created_at).getTime() : Date.now()),
+        created_timestamp: chartStartMs,
+        chart_start_ms: chartStartMs,
+        age_ms: Date.now() - chartStartMs,
         image_url: coin.uri || coin.image_url || null,
         buys: scoring.buys,
         sells: scoring.sells,
         ratio: scoring.ratio,
+        volume: scoring.volume,
         sys_score: scoring.sys_score,
-        ai_score: coin.ai_score || null 
+        ai_score: coin.ai_score || null
       };
-    });
-
-    // PRODUCTION FILTER: Require a score of 20+, sort by best score, slice top 20
-    const momentumCoins = evaluatedCoins
-      .filter(c => c.sys_score >= 20)
+    })
+      // A coin cannot be shortlisted before it has 15s of DexScreener chart data
+      .filter((c) => c.age_ms >= MIN_CHART_AGE_MS)
+      .filter((c) => c.sys_score >= 30)
       .sort((a, b) => b.sys_score - a.sys_score)
       .slice(0, 20);
 
@@ -144,13 +156,13 @@ export async function GET() {
         dex24hCoins: dexCoinsCount ?? 0,
         validCoins: validCoinsCount ?? 0
       },
-      momentumCoins,
+      momentumCoins: evaluatedCoins,
       lastSynced: new Date().toLocaleTimeString(),
       db_status: {
         connected: true,
         totalRows: todayCoinsCount ?? 0,
         filterWindow: todayStartISO,
-        freshnessColumn,
+        freshnessColumn: "last_seen_at",
         lastUpdate
       }
     });

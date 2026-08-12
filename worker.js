@@ -175,6 +175,11 @@ async function batchIngestFromDexScreener() {
       const sells = m5Sells > 0 ? m5Sells : (h1Sells > 0 ? h1Sells : h24Sells);
       const volume = m5Volume > 0 ? m5Volume : (h1Volume > 0 ? h1Volume : h24Volume);
 
+      const mc = Number(pair.fdv || pair.marketCap || 0);
+      // Funnel semantics: verified = listed on DexScreener,
+      // active = passes basic early-entry checkpoints (MC range + buy activity)
+      const passesCheckpoints = mc >= 3000 && mc <= 2000000 && buys > 0;
+
       // NOTE: pump.fun per-coin enrichment is intentionally skipped — its
       // columns (pump_created_timestamp, bonding_curve_progress, ...) don't
       // exist in the production table and would be dropped by sanitization.
@@ -185,7 +190,7 @@ async function batchIngestFromDexScreener() {
         name: pair.baseToken?.name || 'Unknown',
         symbol: pair.baseToken?.symbol || 'MEME',
         is_verified: true,
-        is_active: true,
+        is_active: passesCheckpoints,
         market_cap: Number(pair.marketCap || 0),
         market_cap_usd: Number(pair.fdv || pair.marketCap || 0),
         fdv: Number(pair.fdv || 0),

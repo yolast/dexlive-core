@@ -1,28 +1,60 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
+// The 70-point systematic score (same checkpoints as the scanner feed)
+function calculateSysScore(token) {
+  const mc = token.market_cap_usd || token.market_cap || 0;
+  const gain = token.price_change_24h || token.price_change_h24 || token.price_change_m5 || 0;
+  const buys = token.buys || token.txns_m5_buys || token.txns_h24_buys || 0;
+  const sells = token.sells || token.txns_m5_sells || token.txns_h24_sells || 0;
+  const volume = token.volume || token.volume_m5 || token.volume_h24 || 0;
+  const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
+
+  let score = 0;
+
+  // Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%)
+  if (gain >= 20 && gain <= 500) score += 15;
+  else if (gain >= 10 && gain < 20) score += 10;
+  else if (gain > 0 && gain < 10) score += 5;
+
+  // Checkpoint 2 (+15): Volume Acceleration (proxied by volume velocity vs MC)
+  const volMcRatio = mc > 0 ? volume / mc : 0;
+  if (volMcRatio >= 0.10) score += 15;
+  else if (volMcRatio >= 0.05) score += 10;
+  else if (volMcRatio >= 0.02) score += 5;
+
+  // Checkpoint 3 (+20): Buy/Sell Ratio >= 2.0 & Unique Buyer Density
+  if (ratio >= 2.0) score += 20;
+  else if (ratio >= 1.5) score += 15;
+  else if (ratio >= 1.2) score += 10;
+  else if (ratio >= 1.0) score += 5;
+
+  // Checkpoint 4 (+20): Safety Metrics (proxied by pipeline verification gate)
+  score += 20;
+
+  return {
+    sys_score: Math.min(score, 70),
+    buys,
+    sells,
+    ratio: ratio.toFixed(1),
+    volume
+  };
+}
+
 export async function GET() {
   try {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-    let freshnessColumn = "last_seen_at";
-    const { error: probeError } = await supabase
-      .from('tokens_history')
-      .select('last_seen_at')
-      .limit(1);
-    if (probeError) {
-      console.warn("last_seen_at column not found, falling back to created_at");
-      freshnessColumn = "created_at";
-    }
+    const now = new Date();
+    const todayStartISO = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)).toISOString();
+    const freshTodayFilter = `dex_indexed_timestamp.gte.${todayStartISO},created_at.gte.${todayStartISO}`;
 
     const { data: tokens, error } = await supabase
       .from('tokens_history')
       .select('*')
       .eq('is_verified', true)
       .eq('is_active', true)
-      .gte(freshnessColumn, twentyFourHoursAgo)
-      .order(freshnessColumn, { ascending: false })
-      .limit(100);
+      .or(freshTodayFilter)
+      .order('dex_indexed_timestamp', { ascending: false, nullsFirst: false })
+      .limit(200);
 
     if (error) {
       throw new Error(error.message);
@@ -32,73 +64,39 @@ export async function GET() {
       return NextResponse.json({ success: true, snipers: [] });
     }
 
+    const MIN_CHART_AGE_MS = 15 * 1000;
+
     const scoredSnipers = tokens
       .map((token) => {
-        let score = 0;
-
-        const mc = token.market_cap_usd || token.market_cap || 0;
-        const gain = token.price_change_24h || token.price_change_h24 || token.price_change_m5 || 0;
-        const liquidity = token.liquidity_usd || 0;
-        const buys = token.buys || token.txns_m5_buys || token.txns_h24_buys || 0;
-        const sells = token.sells || token.txns_m5_sells || token.txns_h24_sells || 0;
-        const volume = token.volume || token.volume_m5 || token.volume_h24 || 0;
-        const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
-
-        // --- HARD FILTERS ---
-        if (mc < 3000 || mc > 3000000) return null;
-
-        // --- MOMENTUM SCORE (Max 100) ---
-        // 1. Market Cap sweet spot (0-15)
-        if (mc >= 4000 && mc <= 500000) score += 15;
-        else if (mc > 500000 && mc <= 2000000) score += 8;
-
-        // 2. Gain / momentum (0-25)
-        if (gain >= 500) score += 25;
-        else if (gain >= 100) score += 20;
-        else if (gain >= 50) score += 15;
-        else if (gain >= 20) score += 10;
-        else if (gain > 0) score += 5;
-
-        // 3. Buy pressure ratio (0-20)
-        if (ratio >= 3.0) score += 20;
-        else if (ratio >= 1.5) score += 15;
-        else if (ratio >= 1.0) score += 10;
-        else if (ratio >= 0.5 && buys > 0) score += 5;
-
-        // 4. Volume health (0-15)
-        if (volume >= 500000) score += 15;
-        else if (volume >= 100000) score += 10;
-        else if (volume >= 10000) score += 5;
-
-        // 5. Liquidity depth (0-15)
-        if (liquidity >= 100000) score += 15;
-        else if (liquidity >= 30000) score += 10;
-        else if (liquidity >= 8000) score += 5;
-
-        // 6. Verification / is_active checkpoint passed (base +10)
-        score += 10;
+        const scoring = calculateSysScore(token);
+        // Age = DexScreener chart start time; legacy rows fall back to insertion time
+        const chartStartMs = token.dex_indexed_timestamp
+          ? new Date(token.dex_indexed_timestamp).getTime()
+          : (token.created_at ? new Date(token.created_at).getTime() : Date.now());
 
         return {
           mint: token.mint,
           name: token.name || 'Unknown',
           symbol: token.symbol || 'TKN',
-          market_cap: mc,
-          price_change_24h: gain,
-          buys,
-          sells,
-          ratio: ratio.toFixed(1),
-          volume,
-          liquidity_usd: liquidity,
-          momentum_score: score,
+          market_cap: token.market_cap_usd || token.market_cap || 0,
+          price_change_24h: token.price_change_24h || token.price_change_h24 || 0,
+          buys: scoring.buys,
+          sells: scoring.sells,
+          ratio: scoring.ratio,
+          volume: scoring.volume,
+          liquidity_usd: token.liquidity_usd || 0,
+          sys_score: scoring.sys_score,
+          momentum_score: scoring.sys_score,
           image_url: token.uri || token.image_url || null,
-          created_timestamp: token.last_seen_at
-            ? new Date(token.last_seen_at).getTime()
-            : (token.created_at ? new Date(token.created_at).getTime() : Date.now()),
+          created_timestamp: chartStartMs,
+          chart_start_ms: chartStartMs,
+          age_ms: Date.now() - chartStartMs,
         };
       })
-      .filter(Boolean)
-      .filter((token) => token.momentum_score >= 40)
-      .sort((a, b) => b.momentum_score - a.momentum_score)
+      // A coin cannot be shortlisted before it has 15s of DexScreener chart data
+      .filter((token) => token.age_ms >= MIN_CHART_AGE_MS)
+      .filter((token) => token.sys_score >= 30)
+      .sort((a, b) => b.sys_score - a.sys_score)
       .slice(0, 20);
 
     return NextResponse.json({

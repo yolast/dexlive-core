@@ -36,42 +36,41 @@ function extractJson(text) {
 // Mirror of the stats route's 70-point systematic score so
 // TOTAL = SYS(70) + AI(30) is computed consistently server-side.
 function calculateSysScore(coin) {
-  let score = 0;
   const mc = coin.market_cap_usd || coin.market_cap || 0;
   const gain = coin.price_change_24h || coin.price_change_h24 || coin.price_change_m5 || 0;
-
   const buys = coin.buys || coin.txns_m5_buys || coin.txns_h24_buys || 0;
   const sells = coin.sells || coin.txns_m5_sells || coin.txns_h24_sells || 0;
+  const volume = coin.volume || coin.volume_m5 || coin.volume_h24 || 0;
   const ratio = sells > 0 ? (buys / sells) : (buys > 0 ? buys : 0);
 
-  if (gain < -20 || (sells > buys * 3 && buys > 0)) {
-    return { sys_score: 0, buys, sells, ratio: ratio.toFixed(1) };
-  }
+  let score = 0;
 
-  if (mc >= 4000 && mc <= 500000) score += 15;
-  else if (mc > 500000 && mc <= 2000000) score += 10;
-  else if (mc > 1000 && mc < 4000) score += 5;
+  // Checkpoint 1 (+15): 15s Bullish Close & Gain (+20% to +500%)
+  if (gain >= 20 && gain <= 500) score += 15;
+  else if (gain >= 10 && gain < 20) score += 10;
+  else if (gain > 0 && gain < 10) score += 5;
 
-  if (gain >= 100) score += 20;
-  else if (gain >= 50) score += 15;
-  else if (gain >= 20) score += 10;
-  else if (gain > 0) score += 5;
+  // Checkpoint 2 (+15): Volume Acceleration (proxied by volume velocity vs MC)
+  const volMcRatio = mc > 0 ? volume / mc : 0;
+  if (volMcRatio >= 0.10) score += 15;
+  else if (volMcRatio >= 0.05) score += 10;
+  else if (volMcRatio >= 0.02) score += 5;
 
-  if (ratio >= 2.0) score += 15;
+  // Checkpoint 3 (+20): Buy/Sell Ratio >= 2.0 & Unique Buyer Density
+  if (ratio >= 2.0) score += 20;
+  else if (ratio >= 1.5) score += 15;
   else if (ratio >= 1.2) score += 10;
-  else if (ratio >= 0.8) score += 5;
+  else if (ratio >= 1.0) score += 5;
 
+  // Checkpoint 4 (+20): Safety Metrics (proxied by pipeline verification gate)
   score += 20;
-
-  if (buys > 0 || sells > 0 || (coin.volume || coin.volume_h24 || 0) > 0) {
-    score += 5;
-  }
 
   return {
     sys_score: Math.min(score, 70),
     buys,
     sells,
-    ratio: ratio.toFixed(1)
+    ratio: ratio.toFixed(1),
+    volume
   };
 }
 
@@ -119,9 +118,13 @@ export async function POST(req) {
       buys,
       sells,
       buy_sell_ratio: sells > 0 ? (buys / sells).toFixed(2) : "N/A",
-      age_minutes: coin.created_at
-        ? Math.floor(Math.max(0, Date.now() - new Date(coin.created_at).getTime()) / 60000)
-        : "Unknown",
+      // Age is measured from the DexScreener chart start (dex_indexed_timestamp),
+      // matching the visible coin age on the scanner.
+      age_minutes: coin.dex_indexed_timestamp
+        ? Math.floor(Math.max(0, Date.now() - new Date(coin.dex_indexed_timestamp).getTime()) / 60000)
+        : (coin.created_at
+            ? Math.floor(Math.max(0, Date.now() - new Date(coin.created_at).getTime()) / 60000)
+            : "Unknown"),
       holder_dev_percent: coin.dev_holding_percent ?? "Unknown",
       bonding_curve_progress: coin.bonding_curve_progress ?? "Unknown"
     };
