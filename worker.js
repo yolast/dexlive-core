@@ -168,14 +168,10 @@ async function batchIngestFromDexScreener() {
       const sells = m5Sells > 0 ? m5Sells : (h1Sells > 0 ? h1Sells : h24Sells);
       const volume = m5Volume > 0 ? m5Volume : (h1Volume > 0 ? h1Volume : h24Volume);
 
-      let pumpData = null;
-      try {
-        const pumpRes = await axios.get(`https://frontend-api.pump.fun/coins/${mintAddress}`, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-          timeout: 2000
-        });
-        if (pumpRes.status === 200) pumpData = pumpRes.data;
-      } catch (_) { /* Pump.fun may block — skip enrichment */ }
+      // NOTE: pump.fun per-coin enrichment is intentionally skipped — its
+      // columns (pump_created_timestamp, bonding_curve_progress, ...) don't
+      // exist in the production table and would be dropped by sanitization.
+      // Skipping keeps each batch cycle to ~2-3s so freshness stays live.
 
       const payload = {
         mint: mintAddress,
@@ -208,10 +204,6 @@ async function batchIngestFromDexScreener() {
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
         // dex_indexed_timestamp is TIMESTAMPTZ in production — must write ISO, not epoch ms
         dex_indexed_timestamp: new Date(pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now()).toISOString(),
-        pump_created_timestamp: pumpData?.created_timestamp || null,
-        bonding_curve_progress: pumpData?.bonding_curve_progress || (pumpData?.usd_market_cap > 55000 ? 100 : 0),
-        dev_holding_percent: pumpData?.creator_holding_percent || 0,
-        is_migrated_raydium: pumpData?.complete || false,
       };
       if (hasLastSeenAt) payload.last_seen_at = nowISO;
 

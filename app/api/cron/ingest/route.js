@@ -28,31 +28,6 @@ function sanitizePayload(payload, columns) {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => columns.has(key)));
 }
 
-// Helper Function: Fetch Pre-DEX Data gracefully
-async function fetchPreDexData(mint) {
-  try {
-    const res = await fetch(`https://frontend-api.pump.fun/coins/${mint}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      signal: AbortSignal.timeout(2000),
-      cache: 'no-store'
-    });
-
-    if (!res.ok) return null;
-    const data = await res.json();
-
-    return {
-      pump_created_timestamp: data.created_timestamp || null,
-      dev_holding_percent: data.creator_holding_percent || 0,
-      bonding_curve_progress: data.bonding_curve_progress || (data.usd_market_cap > 55000 ? 100 : 0),
-      is_migrated_raydium: data.complete || false
-    };
-  } catch (error) {
-    return null;
-  }
-}
-
 // Fetch fresh Solana pairs from several DexScreener queries, deduped by mint.
 // (q=pump alone returns mostly tokens literally named "PUMP" — too narrow.)
 async function fetchFreshPairs() {
@@ -102,13 +77,10 @@ export async function GET(req) {
       // dex_indexed_timestamp is TIMESTAMPTZ in production — must write ISO, not epoch ms
       const dexIndexedISO = new Date(dexIndexedTimestamp).toISOString();
 
-      const preDexData = await fetchPreDexData(mintAddress);
-
-      let timeToIndexMs = null;
-      if (preDexData && preDexData.pump_created_timestamp) {
-        timeToIndexMs = dexIndexedTimestamp - preDexData.pump_created_timestamp;
-        if (timeToIndexMs < 0) timeToIndexMs = 0;
-      }
+      // NOTE: pump.fun per-coin enrichment is skipped — its columns
+      // (pump_created_timestamp, bonding_curve_progress, ...) don't exist
+      // in the production table and are dropped by sanitization. Skipping
+      // keeps the pipeline fast.
 
       // Prefer m5 (live) but fall back to h24/h1 so values are never wiped to 0
       const m5PriceChange = Number(pair.priceChange?.m5 || 0);
@@ -162,12 +134,6 @@ export async function GET(req) {
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
 
         dex_indexed_timestamp: dexIndexedISO,
-        pump_created_timestamp: preDexData?.pump_created_timestamp || null,
-        time_to_index_ms: timeToIndexMs,
-
-        bonding_curve_progress: preDexData?.bonding_curve_progress || 0,
-        dev_holding_percent: preDexData?.dev_holding_percent || 0,
-        is_migrated_raydium: preDexData?.is_migrated_raydium || false,
 
         last_seen_at: nowISO
       };
