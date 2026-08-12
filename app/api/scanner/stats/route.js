@@ -86,10 +86,10 @@ export async function GET() {
       .eq("is_active", true)
       .gte(freshnessColumn, todayStartISO);
 
-    // 4. Fetch the freshest 100 verified coins
+    // 4. Fetch the freshest 100 verified coins — select('*') is safe against missing columns
     const { data: recentDexCoins, error: err4 } = await supabase
       .from("tokens_history")
-      .select("mint, name, symbol, market_cap_usd, market_cap, price_change_24h, price_change_h24, price_change_m5, created_at, last_seen_at, uri, image_url, sys_score, ai_score, buys, sells, txns_m5_buys, txns_m5_sells, volume, volume_m5")
+      .select("*")
       .eq("is_verified", true)
       .eq("is_active", true)
       .gte(freshnessColumn, todayStartISO)
