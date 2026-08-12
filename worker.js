@@ -1,7 +1,15 @@
-require('dotenv').config();
+require('dotenv').config({ path: '.env.local', override: true });
+require('dotenv').config(); // fallback to .env if present
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const axios = require('axios');
+
+// Verify credentials are present (dotenv reads .env by default, but the
+// server keeps secrets in .env.local which Next.js loads automatically)
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('❌ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Loaded .env.local:', require('fs').existsSync('.env.local'));
+  process.exit(1);
+}
 
 const supabase = createClient(
   process.env.SUPABASE_URL, 
@@ -136,6 +144,7 @@ async function batchIngestFromDexScreener() {
         .from('tokens_history')
         .upsert(payload, { onConflict: 'mint' });
       if (!upsertError) synced++;
+      else if (synced < 3) console.error(`[Batch] Upsert error for ${mintAddress}:`, upsertError.message);
     }
 
     // Dead-coin purge
