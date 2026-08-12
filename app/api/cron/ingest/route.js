@@ -79,6 +79,8 @@ export async function GET(req) {
       if (!mintAddress) continue;
 
       const dexIndexedTimestamp = pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now();
+      // dex_indexed_timestamp is TIMESTAMPTZ in production — must write ISO, not epoch ms
+      const dexIndexedISO = new Date(dexIndexedTimestamp).toISOString();
 
       const preDexData = await fetchPreDexData(mintAddress);
 
@@ -139,7 +141,7 @@ export async function GET(req) {
         uri: pair.info?.imageUrl || null,
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
 
-        dex_indexed_timestamp: dexIndexedTimestamp,
+        dex_indexed_timestamp: dexIndexedISO,
         pump_created_timestamp: preDexData?.pump_created_timestamp || null,
         time_to_index_ms: timeToIndexMs,
 
@@ -168,7 +170,7 @@ export async function GET(req) {
     const { error: deleteError } = await supabase
       .from('tokens_history')
       .delete()
-      .lt('dex_indexed_timestamp', cutoffTimeMs)
+      .lt('dex_indexed_timestamp', new Date(cutoffTimeMs).toISOString())
       .lt('market_cap_usd', 3000);
 
     if (deleteError) console.warn("Cleanup warning:", deleteError.message);

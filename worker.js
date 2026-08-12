@@ -163,7 +163,8 @@ async function batchIngestFromDexScreener() {
         image_url: pair.info?.imageUrl || null,
         uri: pair.info?.imageUrl || null,
         dex_url: pair.url || `https://dexscreener.com/solana/${mintAddress}`,
-        dex_indexed_timestamp: pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now(),
+        // dex_indexed_timestamp is TIMESTAMPTZ in production — must write ISO, not epoch ms
+        dex_indexed_timestamp: new Date(pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now()).toISOString(),
         pump_created_timestamp: pumpData?.created_timestamp || null,
         bonding_curve_progress: pumpData?.bonding_curve_progress || (pumpData?.usd_market_cap > 55000 ? 100 : 0),
         dev_holding_percent: pumpData?.creator_holding_percent || 0,
@@ -183,10 +184,10 @@ async function batchIngestFromDexScreener() {
       }
     }
 
-    // Dead-coin purge (market_cap_usd exists in the production schema)
+    // Dead-coin purge (dex_indexed_timestamp is TIMESTAMPTZ, market_cap_usd exists)
     const cutoff = Date.now() - 45 * 60 * 1000;
     const { error: purgeError } = await supabase.from('tokens_history').delete()
-      .lt('dex_indexed_timestamp', cutoff)
+      .lt('dex_indexed_timestamp', new Date(cutoff).toISOString())
       .lt('market_cap_usd', 3000);
     if (purgeError) console.error('[Batch] Purge error:', purgeError.message);
 
@@ -262,7 +263,7 @@ async function checkDexScreener(mint, retries = 5) {
         txns_m5_sells: m5Sells,
         volume_m5: m5Vol,
         liquidity_usd: Number(pair.liquidity?.usd || 0),
-        dex_indexed_timestamp: pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now(),
+        dex_indexed_timestamp: new Date(pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now()).toISOString(),
       };
       if (hasLastSeenAt) updateData.last_seen_at = new Date().toISOString();
 
