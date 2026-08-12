@@ -175,3 +175,35 @@ export async function GET(req) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Self-healing background ingest.
+// `next start` is a long-running Node process on OCI, so a module-level
+// interval keeps the DB fresh every 15s even if the separate PM2 worker
+// process is down. Uses the Next.js process env (which provably works —
+// the stats route reads the same Supabase credentials successfully).
+// Guarded so it never starts during `next build`.
+// ─────────────────────────────────────────────────────────────────────────
+const BG_INTERVAL_MS = 15 * 1000;
+
+function startBackgroundIngest() {
+  if (globalThis.__dexliveBgIngestStarted) return;
+  globalThis.__dexliveBgIngestStarted = true;
+
+  const run = async () => {
+    try {
+      await GET();
+    } catch (err) {
+      console.error('🔄 Background ingest error:', err.message);
+    }
+  };
+
+  run();
+  setInterval(run, BG_INTERVAL_MS);
+  console.log('⏰ Self-healing background ingest started (every 15s)');
+}
+
+// Skip only during the production build phase.
+if (process.env.NEXT_PHASE !== 'phase-production-build') {
+  startBackgroundIngest();
+}

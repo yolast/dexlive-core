@@ -4,17 +4,16 @@ const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const axios = require('axios');
 
-// Verify credentials are present (dotenv reads .env by default, but the
-// server keeps secrets in .env.local which Next.js loads automatically)
+// Verify credentials are present. Do NOT exit — if env is missing we keep
+// the process alive so PM2 doesn't crash-loop-stop it; the batch loop will
+// simply retry each cycle and succeed once the environment is available.
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  console.error('❌ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Loaded .env.local:', require('fs').existsSync('.env.local'));
-  process.exit(1);
+  console.error('❌ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. .env.local exists:', require('fs').existsSync('.env.local'));
 }
 
-const supabase = createClient(
-  process.env.SUPABASE_URL, 
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+  : null;
 
 // PumpPortal WebSocket URL
 const PUMP_PORTAL_WS = 'wss://pumpportal.fun/api/data';
@@ -84,6 +83,10 @@ let hasLastSeenAt = false;
 let existingColumns = null;
 
 async function probeSchema() {
+  if (!supabase) {
+    console.error('❌ Supabase client not initialized (env missing) — will retry next cycle');
+    return;
+  }
   try {
     // last_seen_at support
     const { error } = await supabase.from('tokens_history').select('last_seen_at').limit(1);
@@ -140,6 +143,10 @@ async function fetchFreshPairs() {
 }
 
 async function batchIngestFromDexScreener() {
+  if (!supabase) {
+    console.error('❌ Supabase client not initialized (env missing) — skipping batch');
+    return;
+  }
   try {
     console.log('🔄 [Batch] Starting DexScreener search at', new Date().toISOString());
     const pairs = await fetchFreshPairs();
