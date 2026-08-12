@@ -198,7 +198,7 @@ async function batchIngestFromDexScreener() {
         price_change_m5: m5PriceChange,
         price_change_h1: Number(pair.priceChange?.h1 || 0),
         price_change_h24: h24PriceChange,
-        price_change_24h: m5PriceChange || h24PriceChange,
+        price_change_24h: h24PriceChange || m5PriceChange,
         volume_m5: m5Volume,
         volume_h1: h1Volume,
         volume_h24: h24Volume,
@@ -269,7 +269,7 @@ async function checkDexScreener(mint, retries = 5) {
       
       const marketCap = pair.fdv || pair.marketCap || 0;
       // Map the 5M data for momentum snipers, fallback to 24h if missing
-      const priceChange = pair.priceChange?.m5 || pair.priceChange?.h24 || 0; 
+      const priceChange = pair.priceChange?.h24 || pair.priceChange?.m5 || 0; 
       const buys = pair.txns?.m5?.buys || 0;
       const sells = pair.txns?.m5?.sells || 0;
       const volume = pair.volume?.m5 || 0;

@@ -107,7 +107,7 @@ export async function GET() {
       .eq("is_active", true)
       .or(freshTodayFilter)
       .order("dex_indexed_timestamp", { ascending: false, nullsFirst: false })
-      .limit(200);
+      .limit(1000);
 
     if (err4) console.error("Error fetching recent DEX coins:", err4.message);
 
@@ -135,6 +135,7 @@ export async function GET() {
         symbol: coin.symbol || "TKN",
         market_cap: coin.market_cap_usd || coin.market_cap || 0,
         price_change_24h: coin.price_change_24h || coin.price_change_h24 || 0,
+        gain: coin.price_change_24h || coin.price_change_h24 || 0,
         created_timestamp: chartStartMs,
         chart_start_ms: chartStartMs,
         age_ms: Date.now() - chartStartMs,
@@ -148,12 +149,13 @@ export async function GET() {
       };
     })
       // A coin cannot be shortlisted before it has 15s of DexScreener chart
-      // data, and the early-entry window is capped at 24h.
+      // data, the early-entry window is capped at 24h, and a coin trading at
+      // or below its starting price is never listed.
       .filter((c) => c.age_ms >= MIN_CHART_AGE_MS)
       .filter((c) => c.age_ms <= MAX_CHART_AGE_MS)
+      .filter((c) => c.gain > 0)
       .filter((c) => c.sys_score >= 30)
-      .sort((a, b) => b.sys_score - a.sys_score)
-      .slice(0, 20);
+      .sort((a, b) => b.sys_score - a.sys_score);
 
     return NextResponse.json({
       success: true,

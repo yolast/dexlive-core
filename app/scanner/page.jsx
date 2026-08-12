@@ -224,6 +224,7 @@ export default function ProScannerHome() {
                 <tr className="bg-slate-900/80 text-slate-400 border-b border-slate-800">
                   <th className="p-3">Token</th>
                   <th className="p-3">Age</th>
+                  <th className="p-3">Gain (From Start)</th>
                   <th className="p-3">Market Cap</th>
                   <th className="p-3">Buy/Sell Ratio</th>
                   <th className="p-3 text-center">Score</th>
@@ -234,7 +235,7 @@ export default function ProScannerHome() {
               <tbody className="divide-y divide-slate-800/60">
                 {momentumCoins.length === 0 ? (
                   <tr>
-                    <td colSpan="7" className="p-8 text-center">
+                    <td colSpan="8" className="p-8 text-center">
                       {loading ? (
                         <span className="text-slate-500">Scanning blockchain feeds...</span>
                       ) : (
@@ -302,6 +303,11 @@ export default function ProScannerHome() {
                             </div>
                           </td>
                           <td className="p-3 text-slate-300 whitespace-nowrap">{formatCoinAge(coin.created_timestamp)}</td>
+                          <td className="p-3">
+                            <span className={coin.gain > 0 ? "text-emerald-400 font-bold" : "text-red-400 font-bold"}>
+                              {Number(coin.gain || 0).toFixed(1)}%
+                            </span>
+                          </td>
                           <td className="p-3 text-slate-300">${Number(coin.market_cap || 0).toLocaleString()}</td>
                           
                           {/* Buy/Sell Pressure */}
@@ -375,7 +381,7 @@ export default function ProScannerHome() {
                         </tr>
                         {showReasoning && (
                           <tr className="bg-emerald-950/20 border-t-0">
-                            <td colSpan="7" className="px-6 py-3">
+                            <td colSpan="8" className="px-6 py-3">
                               <div className="text-[11px] text-emerald-300 leading-relaxed border-l-2 border-emerald-500/40 pl-3">
                                 <span className="font-bold text-emerald-400">AI Risk Thesis: </span>
                                 {aiData.reasoning}

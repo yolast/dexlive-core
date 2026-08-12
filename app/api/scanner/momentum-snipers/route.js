@@ -55,7 +55,7 @@ export async function GET() {
       .eq('is_active', true)
       .or(freshTodayFilter)
       .order('dex_indexed_timestamp', { ascending: false, nullsFirst: false })
-      .limit(200);
+      .limit(1000);
 
     if (error) {
       throw new Error(error.message);
@@ -82,6 +82,7 @@ export async function GET() {
           symbol: token.symbol || 'TKN',
           market_cap: token.market_cap_usd || token.market_cap || 0,
           price_change_24h: token.price_change_24h || token.price_change_h24 || 0,
+          gain: token.price_change_24h || token.price_change_h24 || 0,
           buys: scoring.buys,
           sells: scoring.sells,
           ratio: scoring.ratio,
@@ -95,13 +96,14 @@ export async function GET() {
           age_ms: Date.now() - chartStartMs,
         };
       })
-      // A coin cannot be shortlisted before it has 15s of chart data, and the
-      // early-entry window is capped at 24h.
+      // A coin cannot be shortlisted before it has 15s of chart data, the
+      // early-entry window is capped at 24h, and a coin trading at or below
+      // its starting price is never listed.
       .filter((token) => token.age_ms >= MIN_CHART_AGE_MS)
       .filter((token) => token.age_ms <= MAX_CHART_AGE_MS)
+      .filter((token) => token.gain > 0)
       .filter((token) => token.sys_score >= 30)
-      .sort((a, b) => b.sys_score - a.sys_score)
-      .slice(0, 20);
+      .sort((a, b) => b.sys_score - a.sys_score);
 
     return NextResponse.json({
       success: true,

@@ -121,7 +121,7 @@ export async function GET(req) {
         price_change_m5: m5PriceChange,
         price_change_h1: Number(pair.priceChange?.h1 || 0),
         price_change_h24: h24PriceChange,
-        price_change_24h: m5PriceChange || h24PriceChange,
+        price_change_24h: h24PriceChange || m5PriceChange,
 
         volume_m5: m5Volume,
         volume_h1: h1Volume,
@@ -278,7 +278,7 @@ async function verifyRecentMints() {
           name: pair.baseToken?.name || 'Unknown',
           symbol: pair.baseToken?.symbol || 'MEME',
           market_cap_usd: mc,
-          price_change_24h: Number(pair.priceChange?.m5 || 0) || Number(pair.priceChange?.h24 || 0),
+          price_change_24h: Number(pair.priceChange?.h24 || 0) || Number(pair.priceChange?.m5 || 0),
           buys,
           sells,
           volume,
