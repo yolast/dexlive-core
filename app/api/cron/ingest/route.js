@@ -1,5 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { NextResponse } from "next/server";
+import WebSocket from "ws";
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 45;
@@ -184,6 +185,119 @@ export async function GET(req) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Real-time new-mint listener (PumpPortal WebSocket).
+// New Pump.fun coins are inserted instantly, feeding the "Today Coins
+// Ingested" counter even if the separate PM2 worker is down.
+// ─────────────────────────────────────────────────────────────────────────
+const PUMP_PORTAL_WS = 'wss://pumpportal.fun/api/data';
+
+function startPumpPortalListener() {
+  if (globalThis.__dexliveWsStarted) return;
+  globalThis.__dexliveWsStarted = true;
+
+  const connect = () => {
+    const ws = new WebSocket(PUMP_PORTAL_WS);
+
+    ws.on('open', () => {
+      console.log('🟢 [Bg] PumpPortal WS connected — listening for new mints');
+      ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
+    });
+
+    ws.on('error', (err) => {
+      console.error('🔴 [Bg] PumpPortal WS error:', err.message || err);
+    });
+
+    ws.on('message', async (data) => {
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.mint) {
+          const { error } = await supabase.from('tokens_history').insert([
+            { mint: parsed.mint, is_verified: false, is_active: false }
+          ]);
+          if (error && !error.message.includes('duplicate')) {
+            console.error(`[Bg] Insert error for ${parsed.mint}:`, error.message);
+          }
+        }
+      } catch (err) {
+        // non-JSON keepalive frames etc.
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('🔴 [Bg] PumpPortal WS closed — reconnecting in 5s');
+      setTimeout(connect, 5000);
+    });
+  };
+
+  connect();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Verification sweep: take recent unverified mints and check them against
+// DexScreener so they advance through the funnel (verified -> active).
+// Runs alongside the batch on the background interval.
+// ─────────────────────────────────────────────────────────────────────────
+async function verifyRecentMints() {
+  try {
+    const columns = await getExistingColumns();
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: mints, error } = await supabase
+      .from('tokens_history')
+      .select('mint')
+      .eq('is_verified', false)
+      .gte('created_at', dayAgo)
+      .order('created_at', { ascending: false })
+      .limit(15);
+
+    if (error) return;
+    if (!mints || mints.length === 0) return;
+
+    for (const { mint } of mints) {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          cache: 'no-store',
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const pair = (data.pairs || []).find((p) => p.chainId === 'solana');
+        if (!pair) continue;
+
+        const mc = Number(pair.fdv || pair.marketCap || 0);
+        const m5Buys = Number(pair.txns?.m5?.buys || 0);
+        const buys = m5Buys || Number(pair.txns?.h24?.buys || 0);
+        const sells = Number(pair.txns?.m5?.sells || 0) || Number(pair.txns?.h24?.sells || 0);
+        const volume = Number(pair.volume?.m5 || 0) || Number(pair.volume?.h24 || 0);
+        const passes = mc >= 3000 && mc <= 2000000 && buys > 0;
+
+        const update = sanitizePayload({
+          is_verified: true,
+          is_active: passes,
+          name: pair.baseToken?.name || 'Unknown',
+          symbol: pair.baseToken?.symbol || 'MEME',
+          market_cap_usd: mc,
+          price_change_24h: Number(pair.priceChange?.m5 || 0) || Number(pair.priceChange?.h24 || 0),
+          buys,
+          sells,
+          volume,
+          uri: pair.info?.imageUrl || null,
+          dex_indexed_timestamp: new Date(pair.pairCreatedAt ? Number(pair.pairCreatedAt) : Date.now()).toISOString(),
+          last_seen_at: new Date().toISOString()
+        }, columns);
+
+        await supabase.from('tokens_history').update(update).eq('mint', mint);
+      } catch (err) {
+        // per-mint failures are non-fatal
+      }
+    }
+  } catch (err) {
+    console.error('[Bg] Verification sweep error:', err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Self-healing background ingest.
 // `next start` is a long-running Node process on OCI, so a module-level
 // interval keeps the DB fresh every 15s even if the separate PM2 worker
@@ -200,6 +314,7 @@ function startBackgroundIngest() {
   const run = async () => {
     try {
       await GET();
+      await verifyRecentMints();
     } catch (err) {
       console.error('🔄 Background ingest error:', err.message);
     }
@@ -213,4 +328,5 @@ function startBackgroundIngest() {
 // Skip only during the production build phase.
 if (process.env.NEXT_PHASE !== 'phase-production-build') {
   startBackgroundIngest();
+  startPumpPortalListener();
 }
